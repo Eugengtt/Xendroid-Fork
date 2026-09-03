@@ -1,54 +1,28 @@
 <p align="center">
-       <img height="256px" src="app/src/main/assets/XenDroid_foreground.png"/>
-    </a>
+  <img src="https://github.com/user-attachments/assets/74d8342e-bbb7-4219-bd59-aa7eacb12b34" width="180" alt="XenDroid Logo">
 </p>
+**XenDroid Fork** is an open-source Android emulator project built upon the original XenDroid codebase. This custom release focuses on providing players with enhanced control over frame rates and clear, real-time hardware diagnostic monitoring directly during gameplay.
 
-<h1 align="center">XenDroid - Android Xbox 360 Emulator</h1>
+**Key Features:**
 
-## History
-XenDroid was initially forked form xa360e, which was based off [Xenia Canary](https://github.com/xenia-canary/xenia-canary).
-However, a complete rebase was made on [Xenia Edge](https://github.com/has207/xenia-edge) with a new Kotlin backend.
-We are looking foward to keep the project updated alongside the Edge fork,
-and keep the code compatible with Xenia licenses.
+* **Slide In-Game Overlay Menu:** Access an intuitive slide-out interface at any time without leaving your game, allowing for quick and seamless settings adjustments on the fly.
+* **Customizable FPS Limiter:** Take direct control over your frame rates with manual capping options for **30, 45, 60, 90, and 120 FPS**. This helps balance high-refresh-rate smoothness against device thermal management and battery consumption.
+* **Real-Time Performance HUD:** Keep track of system load with a live overlay that displays detailed percentage usage for **CPU, GPU, and RAM**, alongside an active **FPS counter**.
+* **Performance Enhancements:** Core code adjustments aim to provide smoother frame delivery compared to the stock version, helping to reduce stutters in supported scenarios.
 
-## Be aware of scams
-- XenDroid is a free project. If you paid for this, then you got scammed.
-- The ONLY reliable source for the apk is in the [releases](https://github.com/rfandango/XenDroid/releases/latest) section, along with the distributed source code.
-  - We cannot be held responsible for edited apks by unkown users, you have been warned.
+**Experimental Notice & Requirements:**
 
-## Issue Reporting
-A dedicated repo will be made to do reports. As of now critical issues are known.
+Please note that this project is currently in an **experimental state**. Because of ongoing optimizations and deep system tweaks, performance, frame consistency, and stability will vary significantly depending on the specific game, application, or your device's hardware. Certain titles may run noticeably smoother, while others might encounter compatibility issues or visual bugs.
 
-In order to give detailed reports, you must compare the android port with `Xenia Edge` using `Vulkan` as a backend. Make sure that the
-issues can be reproduced only on Android. If the issues are on Edge too, then we wait for the developers to fix
-them, and align the port as a consequence.
+* **Recommended Hardware:** For optimal performance and stable high frame rates, a **Snapdragon 8 Gen 2 or higher** processor (with Turnip/Adreno drivers) is strongly recommended.
 
+Legal Disclaimer & Anti-Piracy Policy:
 
-## Building
+XenDroid Fork is strictly an educational, open-source project designed for software development and performance testing purposes.
 
-See [BUILD.md](BUILD.md) for build instructions.
+This project does not condone, support, or promote software piracy in any form.
 
-## LICENSE
+No copyrighted files, ROMs, ISOs, game titles, or proprietary system keys are included with this software or provided by the developer.
 
-Please check the LICENSE file under the appropriate file header and directory for detailed information.
-
-## Device Requirements
-- Snapdragon SoC, GEN 2 or higher
-- Adreno GPU 740 or higher. Lower 7xx have not been tested.
-
-## Recommended Drivers
-- You can get the drivers for your GPU from two sources 
-  - [Whitebelyash upstream drivers](https://github.com/whitebelyash/AdrenoToolsDrivers/releases)
-    - This is a All-In-One driver for a wide range of GPUs
-  - [StevenMXZ forked drivers](https://github.com/StevenMXZ/Adreno-Tools-Drivers/releases)
-    - This one has different drivers for each GPU series
-  
-# Applying the driver
-  - Check your device specs with [CPU X](https://play.google.com/store/apps/details?id=com.abs.cpu_z_advance&hl=it) to get the matching driver.
-  - To apply the drivers go to **Settings** > **Vulkan** > **Custom Vulkan Driver**, then select the zip file.
-
-## About Donations
-I would like to take this opportunity to help a friend out. If you are willing to make donations, please consider donating to
-[Bitshifter's Kofi](https://ko-fi.com/bitsh1ft3r/goal?g=0). He's the maintainer of the [Xenon Project](https://github.com/xenon-emu/xenon)
-and every donation can help making a difference for the maintainer.
-Thank you - Fabxx
+Users are legally required to dump and use only their own legally acquired game backups and files from hardware they physically own.
+<img width="2048" height="922" alt="image" src="https://github.com/user-attachments/assets/50309880-9595-4547-abc8-0027263937cc" />
