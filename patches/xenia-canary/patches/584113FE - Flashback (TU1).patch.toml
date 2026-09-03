@@ -1,0 +1,57 @@
+title_name = "Flashback" # TU1
+title_id = "584113FE" # XA-5118
+hash = "F0714444D8288246" # default.xex
+#media_id = "27960299" # XBLA: AE7FE87EEDAD897576C94D13BC0E04C523B8B01658
+
+[[patch]]
+    name = "Unlock FPS"
+    desc = "See note about framerate patches in the README."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8253b130
+        value = 0x60000000
+    [[patch.be8]]
+        address = 0x82ad7b27
+        value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Disable Lens Flares"
+    desc = "Fixes unoccluded bright lights on-screen."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82878f48
+        value = 0x39400000
+
+[[patch]]
+    name = "Disable Motion Blur"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82413640
+        value = 0x39600000
+
+[[patch]]
+    name = "16x Anisotropic Filtering"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8298f194
+        value = 0x38a00010
+
+[[patch]]
+    name = "Show FPS"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x83916448
+        value = 0x01
+    [[patch.be8]]
+        address = 0x8391645c # Frametime
+        value = 0x01

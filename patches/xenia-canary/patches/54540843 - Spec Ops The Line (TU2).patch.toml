@@ -1,0 +1,55 @@
+title_name = "Spec Ops: The Line" # TU2
+title_id = "54540843" # TT-2115
+hash = "AAF6F46C863E1CD8" # default.xex
+#media_id = "22D4312F" # Disc (USA, Europe): http://redump.org/disc/86927
+
+[[patch]]
+    name = "60 FPS"
+    desc = "See note about framerate patches in the README. Increases vsync target to 60FPS."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x82df4483
+        value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Disable Ambient Occlusion"
+    desc = "Might help with upscaling artifacts or slightly improve GPU performance. Also prevents blacked out textures on Nvidia GPUs with driver 526.47 - 591.86."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82842aa8
+        value = 0x39600000
+
+[[patch]]
+    name = "Disable Motion Blur"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x824693fc
+        value = 0x39600000
+
+[[patch]]
+    name = "Disable Lens Flares"
+    desc = "Fixes unoccluded bright lights on-screen. Probably not required on default occlusion 80/100, most (if not all) flares are hidden."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82943440
+        value = 0x39400000
+
+[[patch]]
+    name = "Show FPS"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x836abf18
+        value = 0x01
+    [[patch.be8]]
+        address = 0x836abf30 # Frametime
+        value = 0x01

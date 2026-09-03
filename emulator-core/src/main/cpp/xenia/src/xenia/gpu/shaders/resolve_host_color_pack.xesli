@@ -1,0 +1,112 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#ifndef XENIA_GPU_SHADERS_RESOLVE_HOST_COLOR_PACK_XESLI_
+#define XENIA_GPU_SHADERS_RESOLVE_HOST_COLOR_PACK_XESLI_
+
+#include "resolve.xesli"
+
+uint XeResolveHostColorPackUnorm(float value, float scale) {
+  return uint(saturate_xe(value) * scale + 0.5f);
+}
+
+uint XeResolveHostColorPackSnorm16(float value) {
+  float clamped = min(max(value, -1.0f), 1.0f);
+  float bias = clamped >= 0.0f ? 0.5f : -0.5f;
+  return uint(int(clamped * 32767.0f + bias)) & 0xFFFFu;
+}
+
+uint XeResolveHostColorPreClampedFloat32To7e3(float value) {
+  uint f32 = float_bits_to_uint_xe(value);
+  uint biased_f32;
+  if (f32 < 0x3E800000u) {
+    uint f32_exp = f32 >> 23u;
+    uint shift = min(125u - f32_exp, 24u);
+    uint mantissa = (f32 & 0x7FFFFFu) | 0x800000u;
+    biased_f32 = mantissa >> shift;
+  } else {
+    biased_f32 = f32 + 0xC2000000u;
+  }
+  uint round_bit = (biased_f32 >> 16u) & 1u;
+  uint f10 = biased_f32 + 0x7FFFu + round_bit;
+  return (f10 >> 16u) & 0x3FFu;
+}
+
+uint XeResolveHostColorFloat32To7e3(float value) {
+  return XeResolveHostColorPreClampedFloat32To7e3(
+      min(max(value, 0.0f), 31.875f));
+}
+
+uint XeResolveHostColorPack32Float(float4_xe color, uint format) {
+  switch (format) {
+    case kXenosColorRenderTargetFormat_8_8_8_8:
+    case kXenosColorRenderTargetFormat_8_8_8_8_GAMMA:
+      return XePackR8G8B8A8(
+          color, kXenosSurfaceNumberFormat_UnsignedRepeatingFraction);
+    case kXenosColorRenderTargetFormat_2_10_10_10:
+    case kXenosColorRenderTargetFormat_2_10_10_10_AS_10_10_10_10:
+      return XePackR10G10B10A2(
+          color, kXenosSurfaceNumberFormat_UnsignedRepeatingFraction);
+    case kXenosColorRenderTargetFormat_2_10_10_10_FLOAT:
+    case kXenosColorRenderTargetFormat_2_10_10_10_FLOAT_AS_16_16_16_16:
+      return XeResolveHostColorFloat32To7e3(color.r) |
+             (XeResolveHostColorFloat32To7e3(color.g) << 10u) |
+             (XeResolveHostColorFloat32To7e3(color.b) << 20u) |
+             (XeResolveHostColorPackUnorm(color.a, 3.0f) << 30u);
+    case kXenosColorRenderTargetFormat_16_16:
+      return XeResolveHostColorPackSnorm16(color.r) |
+             (XeResolveHostColorPackSnorm16(color.g) << 16u);
+    case kXenosColorRenderTargetFormat_16_16_FLOAT:
+      return pack_half_2x16_xe(color.rg);
+    default:
+      return float_bits_to_uint_xe(color.r);
+  }
+}
+
+uint XeResolveHostColorPack32Uint(uint4_xe color, uint format) {
+  switch (format) {
+    case kXenosColorRenderTargetFormat_16_16:
+    case kXenosColorRenderTargetFormat_16_16_FLOAT:
+      return (color.r & 0xFFFFu) | ((color.g & 0xFFFFu) << 16u);
+    case kXenosColorRenderTargetFormat_32_FLOAT:
+      return color.r;
+    default:
+      return color.r;
+  }
+}
+
+uint2_xe XeResolveHostColorPack64Float(float4_xe color, uint format) {
+  switch (format) {
+    case kXenosColorRenderTargetFormat_16_16_16_16:
+      return uint2_xe(XeResolveHostColorPackSnorm16(color.r) |
+                          (XeResolveHostColorPackSnorm16(color.g) << 16u),
+                      XeResolveHostColorPackSnorm16(color.b) |
+                          (XeResolveHostColorPackSnorm16(color.a) << 16u));
+    case kXenosColorRenderTargetFormat_16_16_16_16_FLOAT:
+      return uint2_xe(pack_half_2x16_xe(color.rg),
+                      pack_half_2x16_xe(color.ba));
+    default:
+      return float_bits_to_uint_xe(color.rg);
+  }
+}
+
+uint2_xe XeResolveHostColorPack64Uint(uint4_xe color, uint format) {
+  switch (format) {
+    case kXenosColorRenderTargetFormat_16_16_16_16:
+    case kXenosColorRenderTargetFormat_16_16_16_16_FLOAT:
+      return uint2_xe((color.r & 0xFFFFu) | ((color.g & 0xFFFFu) << 16u),
+                      (color.b & 0xFFFFu) | ((color.a & 0xFFFFu) << 16u));
+    case kXenosColorRenderTargetFormat_32_32_FLOAT:
+      return color.rg;
+    default:
+      return color.rg;
+  }
+}
+
+#endif  // XENIA_GPU_SHADERS_RESOLVE_HOST_COLOR_PACK_XESLI_

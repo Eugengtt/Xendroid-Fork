@@ -1,0 +1,470 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2025 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#ifndef XENIA_UI_VULKAN_VULKAN_DEVICE_H_
+#define XENIA_UI_VULKAN_VULKAN_DEVICE_H_
+
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <vector>
+
+#include "xenia/ui/vulkan/vulkan_instance.h"
+
+namespace xe {
+namespace ui {
+namespace vulkan {
+
+class VulkanDevice {
+ public:
+  static std::unique_ptr<VulkanDevice> CreateIfSupported(
+      const VulkanInstance* vulkan_instance, VkPhysicalDevice physical_device,
+      bool with_gpu_emulation, bool with_swapchain);
+
+  VulkanDevice(const VulkanDevice&) = delete;
+  VulkanDevice& operator=(const VulkanDevice&) = delete;
+  VulkanDevice(VulkanDevice&&) = delete;
+  VulkanDevice& operator=(VulkanDevice&&) = delete;
+
+  ~VulkanDevice();
+
+  const VulkanInstance* vulkan_instance() const { return vulkan_instance_; }
+
+  VkPhysicalDevice physical_device() const { return physical_device_; }
+
+  // If functionality from higher API versions is used, increase this.
+  // This is for VkApplicationInfo.
+  // "apiVersion must be the highest version of Vulkan that the application is
+  // designed to use"
+  // "The patch version number specified in apiVersion is ignored when creating
+  // an instance object"
+  static constexpr uint32_t kHighestUsedApiMinorVersion =
+      VK_MAKE_API_VERSION(0, 1, 3, 0);
+
+  struct Properties {
+    // Vulkan 1.0
+    uint32_t apiVersion = VK_MAKE_API_VERSION(0, 1, 0, 0);
+    uint32_t driverVersion = 0;
+    uint32_t vendorID = 0;
+    uint32_t deviceID = 0;
+    char deviceName[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE] = {};
+
+    uint32_t maxImageDimension2D = 4096;
+    uint32_t maxImageDimension3D = 256;
+    uint32_t maxImageDimensionCube = 4096;
+    uint32_t maxImageArrayLayers = 256;
+    uint32_t maxStorageBufferRange = uint32_t(1) << 27;
+    uint32_t maxSamplerAllocationCount = 4000;
+    uint32_t maxPerStageDescriptorSamplers = 16;
+    uint32_t maxPerStageDescriptorStorageBuffers = 4;
+    uint32_t maxPerStageDescriptorSampledImages = 16;
+    uint32_t maxPerStageResources = 128;
+    uint32_t maxVertexOutputComponents = 64;
+    uint32_t maxTessellationEvaluationOutputComponents = 64;
+    uint32_t maxGeometryInputComponents = 64;
+    uint32_t maxGeometryOutputComponents = 64;
+    uint32_t maxFragmentInputComponents = 64;
+    uint32_t maxFragmentCombinedOutputResources = 4;
+    float maxSamplerAnisotropy = 1.0f;
+    float timestampPeriod = 0.0f;
+    uint32_t maxViewportDimensions[2] = {4096, 4096};
+    VkDeviceSize minUniformBufferOffsetAlignment = 256;
+    // Max size of a single uniform buffer range bound to a shader. Spec floor is
+    // 16384; used to assert the constants set's per-binding range stays legal
+    // when bound as UNIFORM_BUFFER_DYNAMIC.
+    uint32_t maxUniformBufferRange = 16384;
+    // Max number of UNIFORM_BUFFER_DYNAMIC descriptors usable across all sets in
+    // a single pipeline layout. Spec-guaranteed minimum is 8; the constants set
+    // needs kConstantBufferCount (5). Used to gate use_dynamic_constants_.
+    uint32_t maxDescriptorSetUniformBuffersDynamic = 8;
+    VkDeviceSize minStorageBufferOffsetAlignment = 256;
+    uint32_t maxFramebufferWidth = 4096;
+    uint32_t maxFramebufferHeight = 4096;
+    VkSampleCountFlags framebufferColorSampleCounts =
+        VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    VkSampleCountFlags framebufferDepthSampleCounts =
+        VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    VkSampleCountFlags framebufferStencilSampleCounts =
+        VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    VkSampleCountFlags framebufferNoAttachmentsSampleCounts =
+        VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    VkSampleCountFlags sampledImageColorSampleCounts =
+        VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    VkSampleCountFlags sampledImageIntegerSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+    VkSampleCountFlags sampledImageDepthSampleCounts =
+        VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    VkSampleCountFlags sampledImageStencilSampleCounts =
+        VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    bool standardSampleLocations = false;
+    VkDeviceSize optimalBufferCopyOffsetAlignment = 1;
+    VkDeviceSize optimalBufferCopyRowPitchAlignment = 1;
+    VkDeviceSize nonCoherentAtomSize = 256;
+
+    bool robustBufferAccess = false;
+    bool fullDrawIndexUint32 = false;
+    bool independentBlend = false;
+    bool geometryShader = false;
+    bool tessellationShader = false;
+    bool sampleRateShading = false;
+    bool depthClamp = false;
+    bool fillModeNonSolid = false;
+    bool samplerAnisotropy = false;
+    bool occlusionQueryPrecise = false;
+    bool vertexPipelineStoresAndAtomics = false;
+    bool fragmentStoresAndAtomics = false;
+    bool shaderClipDistance = false;
+    bool shaderCullDistance = false;
+    bool shaderInt16 = false;
+    bool sparseBinding = false;
+    bool sparseResidencyBuffer = false;
+
+    // VK_KHR_sampler_mirror_clamp_to_edge (#15, promoted to 1.2)
+
+    bool samplerMirrorClampToEdge = false;
+
+    // VK_KHR_uniform_buffer_standard_layout (#253, promoted to 1.2)
+
+    bool uniformBufferStandardLayout = false;
+
+    // VK_EXT_scalar_block_layout (#222, promoted to 1.2)
+
+    bool scalarBlockLayout = false;
+
+    // VK_EXT_host_query_reset (promoted to 1.2)
+
+    bool hostQueryReset = false;
+
+    // VK_KHR_shader_float16_int8 (#83, promoted to 1.2)
+
+    bool shaderFloat16 = false;
+
+    // VK_KHR_portability_subset (#164)
+
+    bool constantAlphaColorBlendFactors = false;
+    bool imageViewFormatReinterpretation = false;
+    bool imageViewFormatSwizzle = false;
+    bool pointPolygons = false;
+    bool separateStencilMaskRef = false;
+    bool shaderSampleRateInterpolationFunctions = false;
+    bool triangleFans = false;
+
+    // VK_KHR_driver_properties (#197, promoted to 1.2)
+
+    VkDriverId driverID = VkDriverId(0);
+
+    // VK_KHR_shader_float_controls (#198, promoted to 1.2)
+
+    bool shaderSignedZeroInfNanPreserveFloat32 = false;
+    bool shaderDenormFlushToZeroFloat32 = false;
+    bool shaderRoundingModeRTEFloat32 = false;
+
+    // VK_EXT_fragment_shader_interlock (#252)
+
+    bool fragmentShaderSampleInterlock = false;
+    bool fragmentShaderPixelInterlock = false;
+
+    // VK_EXT_shader_demote_to_helper_invocation (#277, promoted to 1.3)
+
+    bool shaderDemoteToHelperInvocation = false;
+
+    // VK_KHR_dynamic_rendering (#55, promoted to 1.3)
+
+    bool dynamicRendering = false;
+
+    // VK_KHR_dynamic_rendering_local_read (#233, promoted to 1.4)
+
+    bool dynamicRenderingLocalRead = false;
+
+    // VK_EXT_non_seamless_cube_map (#423)
+
+    bool nonSeamlessCubeMap = false;
+
+    // VK_EXT_custom_border_color (#288)
+
+    bool customBorderColors = false;
+    bool customBorderColorWithoutFormat = false;
+
+    // VK_KHR_fragment_shader_barycentric (#322)
+
+    bool fragmentShaderBarycentric = false;
+
+    // Vulkan 1.1 Subgroup Properties
+    uint32_t subgroupSize = 32;
+    VkShaderStageFlags subgroupSupportedStages = 0;
+    VkSubgroupFeatureFlags subgroupSupportedOperations = 0;
+
+    // VK_EXT_subgroup_size_control (#226, promoted to 1.3)
+    uint32_t minSubgroupSize = 0;
+    uint32_t maxSubgroupSize = 0;
+    bool subgroupSizeControl = false;
+    bool computeFullSubgroups = false;
+
+    // VK_EXT_extended_dynamic_state (#268) / VK_EXT_extended_dynamic_state2
+    // (#378). Both promoted to Vulkan 1.3 core. On the target (Vulkan 1.3),
+    // these are always available; the flags are only false on pre-1.3 devices
+    // without the extensions (in which case the extended-dynamic-state path is
+    // disabled entirely).
+    bool extendedDynamicState = false;
+
+    // VK_EXT_extended_dynamic_state3 (#456). Not promoted to core; per-
+    // sub-feature bools queried from VkPhysicalDeviceExtendedDynamicState3-
+    // FeaturesEXT. Each gates one piece of dynamic state - when false, that
+    // field is baked into the pipeline key instead of being made dynamic.
+    bool extendedDynamicState3DepthClampEnable = false;
+    bool extendedDynamicState3PolygonMode = false;
+    bool extendedDynamicState3ColorBlendEnable = false;
+    bool extendedDynamicState3ColorBlendEquation = false;
+    bool extendedDynamicState3ColorWriteMask = false;
+    // Governs whether dynamic primitive topology may cross topology class
+    // (point/line/triangle/patch). When false, dynamic topology must stay
+    // within the class the pipeline was created with, so the class is kept in
+    // the pipeline key.
+    bool extendedDynamicState3PrimitiveTopologyUnrestricted = false;
+
+    // VK_EXT_external_memory_host (#179). Alignment a host pointer must satisfy
+    // to be imported. 0 if the extension is not enabled.
+    VkDeviceSize minImportedHostPointerAlignment = 0;
+  };
+
+  // Properties of the core API and enabled extensions, and enabled features.
+  // Some supported functionality is enabled conditionally based on the
+  // `with_swapchain` and `with_gpu_emulation` options.
+  const Properties& properties() const { return properties_; }
+
+  // Enabled extensions not fully covered by the device properties and optional
+  // feature flags in the `Properties` structure (primarily those adding API
+  // functionality rather than GPU features). Also set to true if the version of
+  // the Vulkan API they were promoted to it supported (with the
+  // `ext_major_minor_` prefix rather than `ext_`).
+  struct Extensions {
+    bool ext_KHR_swapchain = false;                     // #2
+    bool ext_1_1_KHR_dedicated_allocation = false;      // #128
+    bool ext_EXT_shader_stencil_export = false;         // #141
+    bool ext_1_1_KHR_get_memory_requirements2 = false;  // #147
+    bool ext_1_2_KHR_image_format_list = false;         // #148
+    // Has optional features not implied by this being true.
+    bool ext_1_1_KHR_sampler_ycbcr_conversion = false;  // #157
+    bool ext_1_1_KHR_bind_memory2 = false;              // #158
+    bool ext_1_2_KHR_spirv_1_4 = false;                 // #237
+    bool ext_EXT_memory_budget = false;                 // #238
+    bool ext_1_2_EXT_host_query_reset = false;          // promoted to 1.2
+    // Has optional features not implied by this being true.
+    bool ext_1_3_KHR_maintenance4 = false;  // #414
+    // VK_KHR_dynamic_rendering (#55, promoted to 1.3)
+    bool ext_1_3_KHR_dynamic_rendering = false;
+    // VK_KHR_dynamic_rendering_local_read (#233, promoted to 1.4)
+    bool ext_1_4_KHR_dynamic_rendering_local_read = false;
+    // VK_EXT_subgroup_size_control (#226, promoted to 1.3)
+    bool ext_1_3_EXT_subgroup_size_control = false;
+    // VK_KHR_fragment_shader_barycentric (#322) or
+    // VK_NV_fragment_shader_barycentric (#203)
+    bool ext_KHR_fragment_shader_barycentric = false;
+#if XE_PLATFORM_WIN32
+    // VK_EXT_full_screen_exclusive (#256, Windows only)
+    bool ext_EXT_full_screen_exclusive = false;
+#endif
+    // VK_EXT_device_fault (#342). For driver-side fault description after
+    // VK_ERROR_DEVICE_LOST.
+    bool ext_EXT_device_fault = false;
+    // VK_EXT_extended_dynamic_state3 (#456). Per-sub-feature dynamic state for
+    // collapsing pipeline-state-object key permutations. EDS1/EDS2 are core in
+    // Vulkan 1.3 and tracked via Properties::extendedDynamicState instead.
+    bool ext_EXT_extended_dynamic_state3 = false;
+
+    // VK_EXT_external_memory_host (#179). Imports guest RAM as device memory so
+    // the shared-memory buffer can alias guest RAM directly (zero-copy).
+    bool ext_EXT_external_memory_host = false;
+  };
+
+  const Extensions& extensions() const { return extensions_; }
+
+  // VK_EXT_external_memory_host entry point, or null if not enabled.
+  PFN_vkGetMemoryHostPointerPropertiesEXT vkGetMemoryHostPointerPropertiesEXT()
+      const {
+    return vkGetMemoryHostPointerPropertiesEXT_;
+  }
+
+  VkDevice device() const { return device_; }
+
+  struct Functions {
+#define XE_UI_VULKAN_FUNCTION(name) PFN_##name name = nullptr;
+#define XE_UI_VULKAN_FUNCTION_PROMOTED(extension_name, core_name) \
+  PFN_##core_name core_name = nullptr;
+#include "xenia/ui/vulkan/functions/device_1_0.inc"
+    // VK_KHR_swapchain (#2)
+#include "xenia/ui/vulkan/functions/device_khr_swapchain.inc"
+    // VK_KHR_get_memory_requirements2 (#147, promoted to 1.1)
+#include "xenia/ui/vulkan/functions/device_1_1_khr_get_memory_requirements2.inc"
+    // VK_KHR_bind_memory2 (#158, promoted to 1.1)
+#include "xenia/ui/vulkan/functions/device_1_1_khr_bind_memory2.inc"
+    // VK_EXT_host_query_reset (promoted to 1.2)
+#include "xenia/ui/vulkan/functions/device_1_2_ext_host_query_reset.inc"
+    // VK_KHR_maintenance4 (#414, promoted to 1.3)
+#include "xenia/ui/vulkan/functions/device_1_3_khr_maintenance4.inc"
+    // VK_KHR_dynamic_rendering (#55, promoted to 1.3)
+#include "xenia/ui/vulkan/functions/device_1_3_khr_dynamic_rendering.inc"
+    // VK_KHR_dynamic_rendering_local_read (#233, promoted to 1.4)
+#include "xenia/ui/vulkan/functions/device_1_4_khr_dynamic_rendering_local_read.inc"
+    // VK_EXT_extended_dynamic_state (#268, promoted to 1.3) +
+    // VK_EXT_extended_dynamic_state2 (#378, promoted to 1.3).
+#include "xenia/ui/vulkan/functions/device_ext_extended_dynamic_state.inc"
+    // vkCmdSetPrimitiveTopology (#268) / vkCmdSetPrimitiveRestartEnable (#378),
+    // core 1.3 entry points loaded by core name.
+#include "xenia/ui/vulkan/functions/device_1_3_core_dynamic_topology.inc"
+#undef XE_UI_VULKAN_FUNCTION_PROMOTED
+    // VK_EXT_extended_dynamic_state3 (#456) - never promoted, always loaded by
+    // EXT name and only when the extension is present (optional, non-fatal).
+#include "xenia/ui/vulkan/functions/device_ext_extended_dynamic_state3.inc"
+#undef XE_UI_VULKAN_FUNCTION
+  };
+
+  const Functions& functions() const { return functions_; }
+
+  template <typename Object>
+  void SetObjectName(const VkObjectType object_type, const Object object_handle,
+                     const char* const object_name) const {
+    if (!vulkan_instance()->extensions().ext_EXT_debug_utils) {
+      return;
+    }
+    VkDebugUtilsObjectNameInfoEXT object_name_info;
+    object_name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+    object_name_info.pNext = nullptr;
+    object_name_info.objectType = object_type;
+    object_name_info.objectHandle = (uint64_t)object_handle;
+    object_name_info.pObjectName = object_name;
+    vulkan_instance()->functions().vkSetDebugUtilsObjectNameEXT(
+        device(), &object_name_info);
+  }
+
+  struct Queue {
+    // Host access to queues must be externally synchronized in Vulkan.
+    std::recursive_mutex mutex;
+    VkQueue queue = nullptr;
+
+    explicit Queue(const VkQueue queue) : queue(queue) {}
+
+    class Acquisition {
+     public:
+      explicit Acquisition(Queue& queue)
+          : lock_(queue.mutex), queue_(queue.queue) {}
+
+      VkQueue queue() const { return queue_; }
+
+     private:
+      std::unique_lock<std::recursive_mutex> lock_;
+      VkQueue queue_;
+    };
+
+    Acquisition Acquire() { return Acquisition(*this); }
+  };
+
+  struct QueueFamily {
+    VkQueueFlags queue_flags = 0;
+    bool may_support_presentation = false;
+    std::vector<std::unique_ptr<Queue>> queues;
+  };
+
+  const std::vector<QueueFamily>& queue_families() const {
+    return queue_families_;
+  }
+  uint32_t queue_family_graphics_compute() const {
+    return queue_family_graphics_compute_;
+  }
+  // UINT32_MAX if not supported or not enabled.
+  // May be the same as queue_family_graphics_compute().
+  uint32_t queue_family_sparse_binding() const {
+    return queue_family_sparse_binding_;
+  }
+  // Dedicated transfer-only queue family (the DMA / copy engine), or UINT32_MAX
+  // if the device has no transfer-only family. Distinct from
+  // queue_family_graphics_compute().
+  uint32_t queue_family_transfer() const { return queue_family_transfer_; }
+
+  Queue::Acquisition AcquireQueue(const uint32_t queue_family_index,
+                                  const uint32_t queue_index) const {
+    return queue_families()[queue_family_index].queues[queue_index]->Acquire();
+  }
+
+  struct MemoryTypes {
+    uint32_t device_local = 0b0;
+    uint32_t host_visible = 0b0;
+    uint32_t host_coherent = 0b0;
+    uint32_t host_cached = 0b0;
+    // Memory types that are both device-local and host-visible (ReBAR/SAM)
+    uint32_t device_local_host_visible = 0b0;
+  };
+
+  const MemoryTypes& memory_types() const { return memory_types_; }
+
+  // Returns whether a device loss has been observed for the first time, so, for
+  // instance, logging of the device loss can be limited only to the location
+  // where it was first caught.
+  bool SetLost() noexcept {
+    return !lost_.exchange(true, std::memory_order_acq_rel);
+  }
+  bool IsLost() const noexcept { return lost_.load(std::memory_order_acquire); }
+
+  // Queries VK_EXT_device_fault for driver-side fault info after DEVICE_LOST
+  // and logs it. Safe to call from multiple device-loss observers; logs at most
+  // once. No-op if the extension is not enabled or the query fails.
+  void LogFaultInfo();
+
+  VkResult SubmitAndUpdateLost(const VkQueue queue, const uint32_t submit_count,
+                               const VkSubmitInfo* const submits,
+                               const VkFence fence) {
+    const VkResult submit_result =
+        functions().vkQueueSubmit(queue, submit_count, submits, fence);
+    if (submit_result == VK_ERROR_DEVICE_LOST) {
+      if (SetLost()) {
+        LogFaultInfo();
+      }
+    }
+    return submit_result;
+  }
+
+ private:
+  explicit VulkanDevice(const VulkanInstance* vulkan_instance,
+                        VkPhysicalDevice physical_device);
+
+  const VulkanInstance* vulkan_instance_ = nullptr;
+  VkPhysicalDevice physical_device_ = nullptr;
+
+  Properties properties_;
+  Extensions extensions_;
+
+  VkDevice device_ = nullptr;
+
+  Functions functions_;
+
+  std::vector<QueueFamily> queue_families_;
+  uint32_t queue_family_graphics_compute_ = UINT32_MAX;
+  uint32_t queue_family_sparse_binding_ = UINT32_MAX;
+  uint32_t queue_family_transfer_ = UINT32_MAX;
+
+  MemoryTypes memory_types_;
+
+  std::atomic<bool> lost_{false};
+
+  // VK_EXT_device_fault function pointer, loaded only if the extension is
+  // enabled. Null otherwise.
+  PFN_vkGetDeviceFaultInfoEXT vkGetDeviceFaultInfoEXT_ = nullptr;
+  // VK_EXT_external_memory_host function pointer, loaded only if the extension
+  // is enabled. Null otherwise.
+  PFN_vkGetMemoryHostPointerPropertiesEXT vkGetMemoryHostPointerPropertiesEXT_ =
+      nullptr;
+  // Set when LogFaultInfo() has already logged - prevents repeat logging from
+  // multiple device-loss observers.
+  std::atomic_flag fault_info_logged_ = ATOMIC_FLAG_INIT;
+};
+
+}  // namespace vulkan
+}  // namespace ui
+}  // namespace xe
+
+#endif  // XENIA_UI_VULKAN_VULKAN_DEVICE_H_

@@ -1,0 +1,83 @@
+title_name = "Batman: Arkham Asylum GOTY" # Game Of The Year
+title_id = "5343080B" # SC-2059
+hash = "2C06E5E920A8291E" # default.xex
+#media_id = [
+#    "71D29B88", # Disc (Europe): http://redump.org/disc/68344
+#    "1BBF41A8"  # Disc (USA):    http://redump.org/disc/50243
+#]
+
+[[patch]]
+    name = "Debug Menu"
+    desc = "Activate with RB+Start."
+    author = "dron_3" # https://dron-3.blogspot.com/2020/11/batman-arkham-series-xbox-360-debug-menu.html
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x82749fdf
+        value = 0x00
+    [[patch.be8]]
+        address = 0x82749ffb
+        value = 0x00
+
+[[patch]]
+    name = "60 FPS"
+    desc = "See note about framerate patches in the README. Increases vsync target to 60FPS."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x82a2eb0f
+        value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Black Shading Fix"
+    desc = "Disables MSAA"
+    author = "HouseofTudor"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82878abc
+        value = 0x39600000
+
+[[patch]]
+    name = "Anisotropic Filtering x16"
+    author = "HouseofTudor"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82372ae8
+        value = 0x38a00010
+
+[[patch]]
+    name = "Upscaling Post Processing Fix"
+    author = "HouseofTudor"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x82351d7b
+        value = 0x00
+    [[patch.be8]]
+        address = 0x82422ab3
+        value = 0x00
+    [[patch.be8]]
+        address = 0x824ac373
+        value = 0x00
+
+[[patch]]
+    name = "Disable Motion Blur"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82273164
+        value = 0x39600000
+
+[[patch]]
+    name = "Disable Lens Flares"
+    desc = "Disables flares, but lights casting flares don't light up at all. Can be improved."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x826c9b9c
+        value = 0x39400000

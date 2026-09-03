@@ -1,0 +1,202 @@
+title_name = "Gears of War: Judgment"
+title_id = "4D530A26" # MS-2598
+hash = "013148141A27D4C7" # default.xex
+#media_id = [
+#    "0308370F", # XBLA: 74581ca18a3167fccf2210e120d69c73d2562442, ja-JP pt-BR
+#    "250B2C78", # Disc (Europe):      http://redump.org/disc/65904
+#    "3528321A", # Disc (USA, Europe): http://redump.org/disc/57311
+#    "4AF734C4", # Disc (Japan):       http://redump.org/disc/69679
+#    "40589F37", # XBLA: 78255903a89666c9d40deb8568cb32c2d84b39fb, en-GB en-IE ru-RU
+#    "52ABEBAF", # XBLA: 38c1bdea0e6237ac9afbc91e184d09bb280a65ca, de-AT de-CH de-DE fr-CH fr-FR
+#    "6DCAF3C2", # XBLA: 87daed863476d86f36a9c740aa6514cfd19d4e9d, da-DK en-AU en-CA en-HK en-IN en-NZ en-SG en-US en-ZA es-AR es-CL es-CO es-MX fi-FI fr-BE fr-CA ko-KR nb-NO nl-BE nl-NL pl-PL pt-PT
+#    "72681C24", # XBLA: 78762109ce79f9a34d32b3a6ec6c2cf581da2596, es-ES it-IT
+#]
+
+[[patch]]
+    name = "Unlock FPS"
+    desc = "See note about framerate patches in the README."
+    author = "illusion, boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8255e220
+        value = 0x60000000
+    [[patch.be8]]
+        address = 0x82bdf113
+        value = 0x01
+
+[[patch]]
+    name = "Disable Lens Flares"
+    desc = "Fixes unoccluded bright lights on-screen."
+    author = "illusion, boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8288eb50
+        value = 0x39400000
+
+[[patch]]
+    name = "16x Anisotropic Filtering"
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8299b564
+        value = 0x38a00010
+
+[[patch]]
+    name = "Disable All Post-Processing"
+    desc = "Dramatically changes the overall look of the game. Try using Disable Motion Blur, Disable FXAA and Resolution Scaling Fix instead if this patch makes the game look too flat."
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be16]]
+        address = 0x827e50ec
+        value = 0x4800
+
+[[patch]]
+    name = "Resolution Scaling Fix"
+    desc = "Use alongside Disable FXAA. Patches post-processing effects to be upscaling-friendly."
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x8236aeff
+        value = 0x00
+    [[patch.be8]]
+        address = 0x8236af3f
+        value = 0x00
+
+[[patch]]
+    name = "Disable FXAA"
+    desc = "A clearer image at the expense of slightly more aliasing."
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8243ffb0
+        value = 0x39600000
+
+[[patch]]
+    name = "Disable Ambient Occlusion"
+    desc = "May slightly increase performance and prevent graphical arifacts when upscaling."
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82428e94
+        value = 0x39400000
+    [[patch.be32]]
+        address = 0x8242ac30
+        value = 0x39400000
+
+[[patch]]
+    name = "Disable Motion Blur"
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82441eb0
+        value = 0x39600000
+    [[patch.be32]]
+        address = 0x827ccc84
+        value = 0x39600000
+
+[[patch]]
+    name = "Disable Depth of Field"
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x824d7c58
+        value = 0x39600000
+    [[patch.be32]]
+        address = 0x825b747c
+        value = 0x39600000
+
+[[patch]]
+    name = "Disable Bloom"
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x825b7478
+        value = 0x39400000
+
+[[patch]]
+    name = "Disable Film Grain"
+    desc = "Disables the film grain post-process effect. Does not impact performance."
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8243cf5c
+        value = 0xc01f0000
+
+[[patch]]
+    name = "Disable Coalesced hash check"
+    desc = "Allows for Coalesced modifications."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x82dbe807
+        value = 0x00
+
+[[patch]]
+    name = "Show FPS"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x83544e20
+        value = 0x01
+    [[patch.be8]]
+        address = 0x83544e34 # Frametime
+        value = 0x01
+
+[[patch]]
+    name = "Steam Deck / 16:10 Aspect Ratio Support"
+    desc = "Must set present_letterbox = FALSE in the xenia canary config. Designed for Steam Deck and modern gaming laptop displays. Expands gameplay and cutscene rendering to true 16:10, updates the FOV axis constraint for proper framing, and adds pillarboxing for pre-rendered videos."
+    author = "TudorHorse, boma"
+    is_enabled = false
+
+    [[patch.be16]]
+        address = 0x82992692 # Define scene color buffer width
+        value = 0x0480 # 1152 (1152x720)
+    [[patch.f32]]
+        address = 0x82082c30 # .rdata float for post-process effect scaling
+        value = 1.6
+    [[patch.be16]]
+        address = 0x826404f8 # ConstrainAspectRatio = FALSE
+        value = 0x4800
+    [[patch.be32]]
+        address = 0x82902d18 # Ignore cameraactor
+        value = 0x60000000
+    [[patch.be32]]
+        address = 0x82902d74 # AdjustFOVForViewport
+        value = 0x4ba6003c # b 0x82362db0 code cave
+    [[patch.be32]]
+        address = 0x82362db0 # recreate instruction
+        value = 0xecc94024 # fdivs f6, f9, f8
+    [[patch.be32]]
+        address = 0x82362db4
+        value = 0xec2701b2 # fmuls f1, f7, f6
+    [[patch.be32]]
+        address = 0x82362db8
+        value = 0x3d603f66 # lis r11, 0x3f66
+    [[patch.be32]]
+        address = 0x82362dbc
+        value = 0x616b6666 # ori r11, r11, 0x6666 (0x3f666666 = 0.9f)
+    [[patch.be32]]
+        address = 0x82362dc0
+        value = 0x91610058 # stw r11, 0x58(r1)
+    [[patch.be32]]
+        address = 0x82362dc4
+        value = 0xc0010058 # lfs f0, 0x58(r1)
+    [[patch.be32]]
+        address = 0x82362dc8 # apply FOV multiplier
+        value = 0xec210032 # fmuls f1, f1, f0
+    [[patch.be32]]
+        address = 0x82362dcc # return
+        value = 0x4859ffac # b 0x82902d78

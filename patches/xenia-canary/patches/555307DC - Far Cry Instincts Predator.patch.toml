@@ -1,0 +1,29 @@
+title_name = "Far Cry Instincts: Predator" # FC
+title_id = "555307DC" # US-2012
+hash = "F35793FBFB34BD49" # default.xex
+#media_id = "4971ECEF" # Disc (USA, Europe): http://redump.org/disc/16404
+
+[[patch]]
+    name = "60 FPS"
+    author = "Margen67"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x8273e89f
+        value = 0x01
+
+[[patch]]
+    name = "Disable Bloom"
+    desc = "Lets the game run without needing readback_resolve enabled in certain scenes."
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8221c49c
+        value = 0x38a00000 # li r5, 0
+    [[patch.be32]]
+        address = 0x820f3690
+        value = 0x39800000 # li r12, 0
+    [[patch.be32]]
+        address = 0x820f3694
+        value = 0x918b1180 # stw r12, 0x1180(r11)

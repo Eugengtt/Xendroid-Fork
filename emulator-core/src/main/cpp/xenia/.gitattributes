@@ -1,0 +1,14 @@
+*           text=auto whitespace=blank-at-eol,tab-in-indent,trailing-space,tabwidth=2
+
+*.bat       text eol=crlf
+*.sh        text eol=lf
+
+*.sln       text eol=crlf -whitespace
+*.csproj    text eol=crlf -whitespace merge=union
+*.vcxproj   text eol=crlf -whitespace merge=union
+*.props     text eol=crlf -whitespace merge=union
+
+src/**/shaders/bytecode/** linguist-generated=true
+# Preserve CRLF for generated shader headers
+src/xenia/gpu/shaders/bytecode/d3d12_5_1/*.h text eol=crlf
+src/**/testing/** linguist-detectable=false

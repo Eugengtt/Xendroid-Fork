@@ -1,0 +1,58 @@
+title_name = "Transformers War for Cybertron" # TU1
+title_id = "4156084C" # AV-2124
+hash = "3AF46199AE02D5C7" # default.xex
+#media_id = [
+#    "02619995", # Disc (USA): http://redump.org/disc/14254/
+#    "3AFEC771" # Disc (Europe): http://redump.org/disc/67200/
+#]
+
+[[patch]]
+    name = "Unlock FPS"
+    desc = "See note about framerate patches in the README."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x826fd274
+        value = 0x60000000
+    [[patch.be8]]
+        address = 0x8249e3ef
+        value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Unlimited Ammo"
+    author = "cochcoder"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x830e7b10
+        value = 0x38600000
+
+[[patch]]
+    name = "Disable Lens Flares"
+    desc = "Fixes unoccluded bright lights on-screen."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82ff93ac
+        value = 0x39400000
+
+[[patch]]
+    name = "16x Anisotropic Filtering"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x829f4d4c
+        value = 0x38a00010
+
+[[patch]]
+    name = "Disable Coalesced hash check"
+    desc = "Allows for Coalesced modifications. Coalesced still has to be decrypted/encrypted."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x833170ff
+        value = 0x00

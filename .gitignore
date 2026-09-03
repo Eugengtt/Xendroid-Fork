@@ -1,0 +1,177 @@
+*.iml
+.gradle
+/local.properties
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+sv.py
+
+app/src/main/lib/
+app/src/main/libs/
+
+aps3e.keystore
+aps3e.jks
+app/release/
+app/.cxx/
+emulator-core/src/main/cpp/bin/
+
+# ==============================================================================
+# Misc system junk
+# ==============================================================================
+
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.com.apple.*
+Thumbs.db
+Desktop.ini
+.svn
+
+# Microprofile settings
+.microprofilepreset.*
+
+# ==============================================================================
+# Projects/IDE files
+# ==============================================================================
+
+*~
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# VIM
+.*.sw[a-z]
+*.un~
+Session.vim
+
+# TextMate
+*.tmproj
+*.tmproject
+tmtags
+
+# Eclipse
+.project
+.metadata
+
+# WebStorm
+.idea
+
+# VS
+.vs
+*.user
+*.sdf
+*.opensdf
+*.suo
+bin/
+obj/
+
+# VSCode
+.vscode
+
+# ==============================================================================
+# Temp generated code
+# ==============================================================================
+
+*.py[co]
+.coverage
+*.o
+*.aps
+
+# Generated shader bytecode
+emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/bytecode/d3d12_5_1/
+emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/bytecode/vulkan_spirv/
+emulator-core/src/main/cpp/xenia/src/xenia/ui/shaders/bytecode/d3d12_5_1/
+emulator-core/src/main/cpp/xenia/src/xenia/ui/shaders/bytecode/vulkan_spirv/
+
+# ==============================================================================
+# Logs and dumps
+# ==============================================================================
+
+npm-debug.log
+private/
+*.trace
+imgui.ini
+*.log
+
+# ==============================================================================
+# Build system output
+# ==============================================================================
+
+# npm/node
+.lock-wscript
+node_modules/
+node_modules/**/build/
+node_modules/.bin/
+
+# coverage/etc
+/scratch/
+
+/build/
+/build-arm64/
+/build-x64/
+
+# ==============================================================================
+# Local-only paths
+# ==============================================================================
+
+.vagrant
+emulator-core/src/main/cpp/xenia/attic/
+emulator-core/src/main/cpp/xenia/content/
+emulator-core/src/main/cpp/xenia/third_party/binutils/binutils-2.24.tar.gz
+emulator-core/src/main/cpp/xenia/third_party/binutils/binutils-2.24/
+emulator-core/src/main/cpp/xenia/third_party/binutils/bin/
+emulator-core/src/main/cpp/xenia/third_party/binutils/powerpc-none-elf/
+emulator-core/src/main/cpp/xenia/third_party/binutils/share/
+emulator-core/src/main/cpp/xenia/third_party/vasm/
+emulator-core/src/main/cpp/xenia/tools/shader-playground/*.dll
+emulator-core/src/main/cpp/xenia/profile_print_times.py
+emulator-core/src/main/cpp/xenia/profile_times.txt
+emulator-core/src/main/cpp/xenia/cache
+emulator-core/src/main/cpp/xenia/cache1
+emulator-core/src/main/cpp/xenia/cache0
+emulator-core/src/main/cpp/xenia/devkit
+emulator-core/src/main/cpp/xenia/recent.toml
+
+
+*.tlog
+/emulator-core/src/main/cpp/xenia/third_party/snappy/CMakeFiles/
+# Ignore snappy's in-source CMake build outputs, but KEEP the upstream source
+# templates (config.h.in / SnappyConfig.cmake.in) -- they are required build
+# inputs, and ignoring the whole cmake/ dir dropped them from history, breaking
+# fresh checkouts/worktrees.
+/emulator-core/src/main/cpp/xenia/third_party/snappy/cmake/*
+!/emulator-core/src/main/cpp/xenia/third_party/snappy/cmake/config.h.in
+!/emulator-core/src/main/cpp/xenia/third_party/snappy/cmake/SnappyConfig.cmake.in
+/emulator-core/src/main/cpp/xenia/third_party/snappy/ALL_BUILD.vcxproj
+/emulator-core/src/main/cpp/xenia/third_party/snappy/ALL_BUILD.vcxproj.filters
+/emulator-core/src/main/cpp/xenia/third_party/snappy/cmake_install.cmake
+/emulator-core/src/main/cpp/xenia/third_party/snappy/CMakeCache.txt
+/emulator-core/src/main/cpp/xenia/third_party/snappy/INSTALL.vcxproj
+/emulator-core/src/main/cpp/xenia/third_party/snappy/INSTALL.vcxproj.filters
+/emulator-core/src/main/cpp/xenia/third_party/snappy/Snappy.sln
+/emulator-core/src/main/cpp/xenia/third_party/snappy/snappy.vcxproj
+/emulator-core/src/main/cpp/xenia/third_party/snappy/snappy.vcxproj.filters
+/emulator-core/src/main/cpp/xenia/third_party/snappy/snappy-stubs-public.h
+/emulator-core/src/main/cpp/xenia/third_party/snappy/ZERO_CHECK.vcxproj
+/emulator-core/src/main/cpp/xenia/third_party/snappy/ZERO_CHECK.vcxproj.filters
+
+# Module build outputs / caches (root /build is anchored; per-module dirs need their own rules)
+/binary_cache/
+emulator-core/src/main/cpp/xenia/third_party/snappy/Makefile
+
+# Git worktrees (isolated workspaces)
+.worktrees/
+
+app/src/debug/jniLibs/
+xendroid-fork.jks
+
+*.jks
+local.properties
+.gradle/
+.cxx/
+build/

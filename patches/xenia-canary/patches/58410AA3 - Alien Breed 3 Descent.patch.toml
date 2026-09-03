@@ -1,0 +1,58 @@
+title_name = "Alien Breed 3: Descent"
+title_id = "58410AA3" # XA-2723
+hash = "7BCF3403CC5862ED" # default.xex
+#media_id = "5E632CAC" # XBLA: 09F750AFC644EF483016A279B71AFA77F46A65CE58
+
+[[patch]]
+    name = "Unlock FPS"
+    desc = "See note about framerate patches in the README."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x825d93d4
+        value = 0x60000000
+    [[patch.be8]]
+        address = 0x828909b7
+        value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Black Shading Fix"
+    desc = "Disables MSAA"
+    author = "HouseofTudor, Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x831433af
+        value = 0x04
+
+[[patch]]
+    name = "Disable Motion Blur"
+    desc = "Solves most ghosting and artifacting caused by quickly panning cameras."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8253793c
+        value = 0x39600000
+
+[[patch]]
+    name = "16x Anisotropic Filtering"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82379594
+        value = 0x38a00010
+
+[[patch]]
+    name = "Show FPS"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x831a97c4
+        value = 0x01
+    [[patch.be8]]
+        address = 0x831a97cc # Frametime
+        value = 0x01

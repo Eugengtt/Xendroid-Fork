@@ -1,0 +1,58 @@
+title_name = "Contrast"
+title_id = "5841141A" # XA-5146
+hash = "C798A62DCA9EFE16" # default.xex
+#media_id = "4D3E2750" # XBLA: B5447CE6F5100D9803CA5B11063E0D95A3AA2A0158
+
+[[patch]]
+    name = "Unlock FPS"
+    desc = "See note about framerate patches in the README."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82459be0
+        value = 0x60000000
+    [[patch.be8]]
+        address = 0x828bcd4b
+        value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Disable Lens Flares"
+    desc = "Fixes unoccluded bright lights on-screen."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8276d488
+        value = 0x39400000
+
+[[patch]]
+    name = "Disable Depth of Field"
+    desc = "Dramatically changes the overall look of the game, but solves DoF related issues."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x822514e8
+        value = 0x39600000
+
+[[patch]]
+    name = "16x Anisotropic Filtering"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x828398f4
+        value = 0x38a00010
+
+[[patch]]
+    name = "Show FPS"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x82d9834c
+        value = 0x01
+    [[patch.be8]]
+        address = 0x82d98364 # Frametime
+        value = 0x01

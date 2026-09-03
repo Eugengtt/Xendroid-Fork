@@ -1,0 +1,35 @@
+# Normalize line endings so the build behaves the same on Windows and Linux.
+# Text files are stored LF in the repo; checkout EOL is forced per type below.
+* text=auto
+
+# The Gradle wrapper: POSIX launcher MUST stay LF (run via `sh`); the Windows
+# launcher MUST be CRLF (cmd.exe batch parsing is line-ending sensitive).
+gradlew      text eol=lf
+gradlew.bat  text eol=crlf
+
+# Scripts: LF everywhere (shebangs break with CRLF on Linux).
+*.sh   text eol=lf
+*.py   text eol=lf
+*.bash text eol=lf
+
+# Windows batch/command files: CRLF.
+*.cmd  text eol=crlf
+
+# Binary assets — never apply EOL/whitespace munging.
+*.jar      binary
+*.zip      binary
+*.so       binary
+*.a        binary
+*.apk      binary
+*.aar      binary
+*.keystore binary
+*.jks      binary
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.ico      binary
+*.webp     binary
+*.ttf      binary
+*.otf      binary
+*.bin      binary

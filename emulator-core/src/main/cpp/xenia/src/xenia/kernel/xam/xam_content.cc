@@ -1,0 +1,1096 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include <atomic>
+#include <thread>
+
+#include "xenia/base/logging.h"
+#include "xenia/base/math.h"
+#include "xenia/base/string_util.h"
+#include "xenia/base/threading.h"
+#include "xenia/emulator.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/smc.h"
+#include "xenia/kernel/user_module.h"
+#include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/xam_content_device.h"
+#include "xenia/kernel/xam/xam_module.h"
+#include "xenia/kernel/xam/xam_private.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
+#include "xenia/kernel/xenumerator.h"
+#include "xenia/kernel/xthread.h"
+#include "xenia/ui/imgui_dialog.h"
+#include "xenia/ui/imgui_drawer.h"
+#include "xenia/vfs/devices/stfs_xbox.h"
+#include "xenia/vfs/devices/xcontent_container_device.h"
+#include "xenia/vfs/iso_metadata.h"
+#include "xenia/vfs/zar_metadata.h"
+#include "xenia/xbox.h"
+
+DECLARE_bool(in_process_title_relaunch);
+
+DEFINE_int32(
+    license_mask, 0,
+    "Set license mask for activated content.\n"
+    " 0 = No licenses enabled.\n"
+    " 1 = First license enabled. Generally the full version license in\n"
+    "     Xbox Live Arcade titles.\n"
+    " -1 or 0xFFFFFFFF = All possible licenses enabled. Generally a\n"
+    "                    bad idea, could lead to undefined behavior.",
+    "Content");
+
+namespace xe {
+namespace kernel {
+namespace xam {
+
+dword_result_t XamContentGetLicenseMask_entry(lpdword_t mask_ptr,
+                                              lpvoid_t overlapped_ptr) {
+  if (!mask_ptr) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
+  auto run = [mask_ptr](uint32_t& extended_error, uint32_t& length) {
+    X_RESULT result = X_ERROR_FUNCTION_FAILED;
+
+    // Remark: This cannot be reflected as on console. Xenia can boot games
+    // directly and XBLA games can be repacked to ZAR. For these titles we must
+    // provide some license. Normally it should fail for OpticalDisc type.
+    if (kernel_state()->deployment_type_ != XDeploymentType::kOther) {
+      // Each bit in the mask represents a granted license. Available licenses
+      // seems to vary from game to game, but most appear to use bit 0 to
+      // indicate if the game is purchased or not.
+      *mask_ptr = static_cast<uint32_t>(cvars::license_mask);
+      result = X_ERROR_SUCCESS;
+    }
+
+    extended_error = X_HRESULT_FROM_WIN32(result);
+    length = 0;
+    return result;
+  };
+
+  if (!overlapped_ptr) {
+    uint32_t extended_error, length;
+    return run(extended_error, length);
+  } else {
+    kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
+    return X_ERROR_IO_PENDING;
+  }
+}
+DECLARE_XAM_EXPORT2(XamContentGetLicenseMask, kContent, kStub, kHighFrequency);
+
+dword_result_t xeXamContentResolve(
+    dword_t user_index, lpvoid_t content_data_ptr, dword_t content_data_size,
+    lpstring_t path_ptr, dword_t path_size, dword_t create_directory,
+    lpstring_t root_name_ptr, pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  auto run = [user_index, content_data_ptr, content_data_size, path_ptr,
+              path_size, create_directory, root_name_ptr](
+                 uint32_t& extended_error, uint32_t& length) -> X_RESULT {
+    XCONTENT_AGGREGATE_DATA content_data;
+    if (content_data_size == sizeof(XCONTENT_DATA)) {
+      content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+    } else if (content_data_size == sizeof(XCONTENT_DATA_INTERNAL)) {
+      // Due to the current implementation of content data we can't use
+      // XCONTENT_DATA_INTERNAL
+      content_data = *content_data_ptr.as<XCONTENT_AGGREGATE_DATA*>();
+    } else {
+      assert_always();
+      return X_ERROR_INVALID_PARAMETER;
+    }
+    uint64_t xuid = 0;
+    if (user_index < XUserMaxUserCount) {
+      const auto profile =
+          kernel_state()->xam_state()->profile_manager()->GetProfile(
+              static_cast<uint8_t>(user_index));
+      if (profile && content_data.content_type == XContentType::kSavedGame) {
+        xuid = profile->xuid();
+      }
+    }
+
+    std::string root_device_path = "";
+
+    if (root_name_ptr) {
+      // Check if root_name is valid.
+      // root_device_path = std::string(root_name_ptr);
+      // Unsupported for now.
+      return X_ERROR_INVALID_PARAMETER;
+    } else {
+      if (content_data.device_id == static_cast<uint32_t>(DummyDeviceId::HDD)) {
+        root_device_path = "\\Device\\Harddisk0\\Partition1\\Content\\";
+      } else if (content_data.device_id ==
+                 static_cast<uint32_t>(DummyDeviceId::ODD)) {
+        // Or GAME, but D: usually means DVD drive meanwhile GAME always
+        // pinpoints to game, even if it is running from HDD
+        root_device_path = "D:\\content\\";
+      } else {
+        return X_ERROR_INVALID_PARAMETER;
+      }
+    }
+
+    const std::string relative_path = fmt::format(
+        "{:016X}\\{:08X}\\{:08X}\\{}", xuid, kernel_state()->title_id(),
+        static_cast<uint32_t>(content_data.content_type.get()),
+        content_data.file_name());
+
+    string_util::copy_truncating(path_ptr, root_device_path + relative_path,
+                                 path_size);
+
+    // Check if it exists and try to mount that package
+    // Result of buffer_ptr is sent to RtlInitAnsiString.
+    // buffer_size is usually 260 (max path).
+    return X_ERROR_SUCCESS;
+  };
+
+  if (!overlapped_ptr) {
+    uint32_t extended_error, length;
+    return run(extended_error, length);
+  } else {
+    kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
+    return X_ERROR_IO_PENDING;
+  }
+}
+
+dword_result_t XamContentResolve_entry(
+    dword_t user_index, lpvoid_t content_data_ptr, lpstring_t path_ptr,
+    dword_t path_size, dword_t create_directory, lpstring_t root_name_ptr,
+    pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  return xeXamContentResolve(user_index, content_data_ptr,
+                             sizeof(XCONTENT_DATA), path_ptr, path_size,
+                             create_directory, root_name_ptr, overlapped_ptr);
+}
+DECLARE_XAM_EXPORT1(XamContentResolve, kContent, kSketchy);
+
+dword_result_t XamContentResolveInternal_entry(
+    lpvoid_t content_data_ptr, lpstring_t path_ptr, dword_t path_size,
+    dword_t create_directory, lpstring_t root_name_ptr,
+    pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  return xeXamContentResolve(
+      XUserIndexNone, content_data_ptr, sizeof(XCONTENT_DATA_INTERNAL),
+      path_ptr, path_size, create_directory, root_name_ptr, overlapped_ptr);
+}
+DECLARE_XAM_EXPORT1(XamContentResolveInternal, kContent, kSketchy);
+
+// https://github.com/MrColdbird/gameservice/blob/master/ContentManager.cpp
+dword_result_t XamContentCreateEnumeratorInternal_entry(
+    qword_t xuid, dword_t device_id, dword_t content_type, dword_t title_id,
+    dword_t content_flags, dword_t items_per_enumerate,
+    lpdword_t buffer_size_ptr, lpdword_t handle_out) {
+  assert_not_null(handle_out);
+
+  auto device_info = device_id == 0 ? nullptr : GetDummyDeviceInfo(device_id);
+  if ((device_id && device_info == nullptr) || !handle_out) {
+    if (buffer_size_ptr) {
+      *buffer_size_ptr = 0;
+    }
+
+    // TODO(benvanik): memset 0 the data?
+    return X_E_INVALIDARG;
+  }
+
+  if (buffer_size_ptr) {
+    *buffer_size_ptr = sizeof(XCONTENT_DATA) * items_per_enumerate;
+  }
+
+  auto e = object_ref<ContentEnumerator>(
+      new ContentEnumerator(kernel_state(), items_per_enumerate));
+
+  auto result =
+      e->Initialize(XUserIndexAny, 0xFE, 0x20005, 0x20007, 0, 0x98, nullptr);
+  if (XFAILED(result)) {
+    return result;
+  }
+
+  uint32_t title = title_id;
+  if (!title) {
+    title = kernel_state()->title_id();
+  }
+
+  std::vector<XCONTENT_AGGREGATE_DATA> enumerated_content =
+      {};  // XCONTENT_DATA_INTERNAL
+
+  if (!device_info || device_info->device_id == DummyDeviceId::HDD) {
+    std::vector<uint64_t> xuids_to_enumerate = {};
+    if (xuid) {
+      xuids_to_enumerate.push_back(xuid);
+    }
+
+    if (!xuid || !(content_flags & vfs::XContentFlag::kExcludeCommon)) {
+      xuids_to_enumerate.push_back(0);  // Common content
+    }
+
+    for (const auto& xuid : xuids_to_enumerate) {
+      auto user_enumerated_data =
+          kernel_state()->content_manager()->ListContent(
+              static_cast<uint32_t>(DummyDeviceId::HDD), xuid, title,
+              static_cast<XContentType>(content_type.value()));
+
+      enumerated_content.insert(enumerated_content.end(),
+                                user_enumerated_data.cbegin(),
+                                user_enumerated_data.cend());
+    }
+
+    // Remove duplicates
+    enumerated_content.erase(
+        std::unique(enumerated_content.begin(), enumerated_content.end()),
+        enumerated_content.end());
+  }
+
+  if (!device_info || device_info->device_id == DummyDeviceId::ODD) {
+    auto disc_enumerated_data =
+        kernel_state()->content_manager()->ListContentODD(
+            static_cast<uint32_t>(DummyDeviceId::ODD), 0, title,
+            XContentType(uint32_t(content_type)));
+
+    enumerated_content.insert(enumerated_content.end(),
+                              disc_enumerated_data.cbegin(),
+                              disc_enumerated_data.cend());
+  }
+
+  for (const auto& content_data : enumerated_content) {
+    e->AppendItem(content_data);
+    XELOGI("{}: Adding: {} (Filename: {}) to enumerator result", __func__,
+           xe::to_utf8(content_data.display_name()), content_data.file_name());
+  }
+
+  XELOGD("XamContentCreateEnumeratorInternal: added {} items to enumerator",
+         e->item_count());
+
+  *handle_out = e->handle();
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamContentCreateEnumeratorInternal, kContent, kImplemented);
+
+dword_result_t XamContentCreateEnumerator_entry(
+    dword_t user_index, dword_t device_id, dword_t content_type,
+    dword_t content_flags, dword_t items_per_enumerate,
+    lpdword_t buffer_size_ptr, lpdword_t handle_out) {
+  uint64_t xuid = 0;
+  if (user_index < XUserMaxUserCount) {
+    const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
+
+    if (!user) {
+      return X_ERROR_NO_SUCH_USER;
+    }
+
+    xuid = user->xuid();
+  }
+
+  return XamContentCreateEnumeratorInternal_entry(
+      xuid, device_id, content_type, 0, content_flags, items_per_enumerate,
+      buffer_size_ptr, handle_out);
+}
+DECLARE_XAM_EXPORT1(XamContentCreateEnumerator, kContent, kImplemented);
+
+enum class kDispositionState : uint32_t { Unknown = 0, Create = 1, Open = 2 };
+
+dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
+                                  lpvoid_t content_data_ptr,
+                                  dword_t content_data_size, dword_t flags,
+                                  lpdword_t disposition_ptr,
+                                  lpdword_t license_mask_ptr,
+                                  dword_t cache_size, qword_t content_size,
+                                  pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  uint64_t xuid = 0;
+  if (user_index != XUserIndexNone && user_index != XUserIndexAny) {
+    const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
+
+    if (!user) {
+      return X_ERROR_NO_SUCH_USER;
+    }
+
+    xuid = user->xuid();
+  }
+
+  if (!root_name || *root_name == '\0') {
+    return X_ERROR_INVALID_NAME;
+  }
+
+  // Check if we have something under provided symlink.
+  std::string symlink_path = root_name.value();
+  if (!symlink_path.ends_with(':')) {
+    symlink_path += ':';
+  }
+
+  if (kernel_state()->file_system()->IsSymbolicLinkRegistered(symlink_path)) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
+  XCONTENT_AGGREGATE_DATA content_data;
+  if (content_data_size == sizeof(XCONTENT_DATA)) {
+    content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+  } else if (content_data_size == sizeof(XCONTENT_AGGREGATE_DATA)) {
+    content_data = *content_data_ptr.as<XCONTENT_AGGREGATE_DATA*>();
+  } else {
+    assert_always();
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
+  if (content_data.content_type == XContentType::kMarketplaceContent) {
+    xuid = 0;
+  }
+
+  auto content_manager = kernel_state()->content_manager();
+
+  if (overlapped_ptr && disposition_ptr) {
+    *disposition_ptr = 0;
+  }
+
+  auto run = [content_manager, xuid, root_name = root_name.value(), flags,
+              content_data, disposition_ptr, license_mask_ptr, overlapped_ptr](
+                 uint32_t& extended_error, uint32_t& length) -> X_RESULT {
+    X_RESULT result = X_ERROR_INVALID_PARAMETER;
+    kDispositionState disposition = kDispositionState::Unknown;
+    switch (flags & 0xF) {
+      case vfs::XContentFlag::kCreateNew:
+        // Fail if exists.
+        if (content_manager->ContentExists(xuid, content_data)) {
+          result = X_ERROR_ALREADY_EXISTS;
+        } else {
+          disposition = kDispositionState::Create;
+        }
+        break;
+      case vfs::XContentFlag::kCreateAlways:
+        // Overwrite existing, if any.
+        if (content_manager->ContentExists(xuid, content_data)) {
+          content_manager->DeleteContent(xuid, content_data);
+        }
+        disposition = kDispositionState::Create;
+        break;
+      case vfs::XContentFlag::kOpenExisting:
+        // Open only if exists.
+        if (!content_manager->ContentExists(xuid, content_data)) {
+          result = X_ERROR_PATH_NOT_FOUND;
+        } else {
+          disposition = kDispositionState::Open;
+        }
+        break;
+      case vfs::XContentFlag::kOpenAlways:
+        // Create if needed.
+        if (!content_manager->ContentExists(xuid, content_data)) {
+          disposition = kDispositionState::Create;
+        } else {
+          disposition = kDispositionState::Open;
+        }
+        break;
+      case vfs::XContentFlag::kTruncateExisting:
+        // Fail if doesn't exist, if does exist delete and recreate.
+        if (!content_manager->ContentExists(xuid, content_data)) {
+          result = X_ERROR_PATH_NOT_FOUND;
+        } else {
+          content_manager->DeleteContent(xuid, content_data);
+          disposition = kDispositionState::Create;
+        }
+        break;
+      default:
+        assert_unhandled_case(flags & 0xF);
+        break;
+    }
+
+    uint32_t content_license = 0;
+    if (disposition == kDispositionState::Create) {
+      result = content_manager->CreateContent(root_name, xuid, content_data);
+      if (XSUCCEEDED(result)) {
+        content_manager->WriteContentHeaderFile(xuid, content_data);
+      }
+    } else if (disposition == kDispositionState::Open) {
+      result = content_manager->OpenContent(root_name, xuid, content_data,
+                                            content_license);
+    }
+
+    if (license_mask_ptr && XSUCCEEDED(result)) {
+      *license_mask_ptr = content_license;
+    }
+
+    extended_error = X_HRESULT_FROM_WIN32(result);
+    length = static_cast<uint32_t>(disposition);
+
+    if (disposition_ptr) {
+      *disposition_ptr = static_cast<uint32_t>(disposition);
+    }
+
+    if (result && overlapped_ptr) {
+      result = X_ERROR_FUNCTION_FAILED;
+    }
+    return result;
+  };
+
+  if (!overlapped_ptr) {
+    uint32_t extended_error, length;
+    return run(extended_error, length);
+  } else {
+    kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
+    return X_ERROR_IO_PENDING;
+  }
+}
+
+dword_result_t XamContentCreateEx_entry(
+    dword_t user_index, lpstring_t root_name, lpvoid_t content_data_ptr,
+    dword_t flags, lpdword_t disposition_ptr, lpdword_t license_mask_ptr,
+    dword_t cache_size, qword_t content_size,
+    pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  auto content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+  if (content_data.file_name_raw[0] == '\0') {
+    return X_ERROR_INVALID_NAME;
+  }
+  return xeXamContentCreate(user_index, root_name, content_data_ptr,
+                            sizeof(XCONTENT_DATA), flags, disposition_ptr,
+                            license_mask_ptr, cache_size, content_size,
+                            overlapped_ptr);
+}
+DECLARE_XAM_EXPORT1(XamContentCreateEx, kContent, kImplemented);
+
+dword_result_t XamContentCreate_entry(
+    dword_t user_index, lpstring_t root_name, lpvoid_t content_data_ptr,
+    dword_t flags, lpdword_t disposition_ptr, lpdword_t license_mask_ptr,
+    pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  return XamContentCreateEx_entry(user_index, root_name, content_data_ptr,
+                                  flags, disposition_ptr, license_mask_ptr, 0,
+                                  0, overlapped_ptr);
+}
+DECLARE_XAM_EXPORT1(XamContentCreate, kContent, kImplemented);
+
+dword_result_t XamContentCreateInternal_entry(
+    lpstring_t root_name, lpvoid_t content_data_ptr, dword_t flags,
+    lpdword_t disposition_ptr, lpdword_t license_mask_ptr, dword_t cache_size,
+    qword_t content_size, pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  auto content_data_internal = *content_data_ptr.as<XCONTENT_AGGREGATE_DATA*>();
+  if (content_data_internal.file_name_raw[0] == '\0') {
+    return X_ERROR_INVALID_NAME;
+  }
+  return xeXamContentCreate(XUserIndexNone, root_name, content_data_ptr,
+                            sizeof(XCONTENT_AGGREGATE_DATA), flags,
+                            disposition_ptr, license_mask_ptr, cache_size,
+                            content_size, overlapped_ptr);
+}
+DECLARE_XAM_EXPORT1(XamContentCreateInternal, kContent, kImplemented);
+
+dword_result_t XamContentOpenFile_entry(
+    dword_t user_index, lpstring_t root_name, lpstring_t path, dword_t flags,
+    lpdword_t disposition_ptr, lpdword_t license_mask_ptr,
+    pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  // TODO(gibbed): arguments assumed based on XamContentCreate.
+  return X_ERROR_FILE_NOT_FOUND;
+}
+DECLARE_XAM_EXPORT1(XamContentOpenFile, kContent, kStub);
+
+dword_result_t XamContentFlush_entry(lpstring_t root_name,
+                                     pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  X_RESULT result = X_ERROR_SUCCESS;
+  if (overlapped_ptr) {
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
+    return X_ERROR_IO_PENDING;
+  } else {
+    return result;
+  }
+}
+DECLARE_XAM_EXPORT1(XamContentFlush, kContent, kStub);
+
+dword_result_t XamContentClose_entry(lpstring_t root_name,
+                                     pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  // Closes a previously opened root from XamContentCreate*.
+  auto result =
+      kernel_state()->content_manager()->CloseContent(root_name.value());
+
+  if (overlapped_ptr) {
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
+    return X_ERROR_IO_PENDING;
+  } else {
+    return result;
+  }
+}
+DECLARE_XAM_EXPORT1(XamContentClose, kContent, kImplemented);
+
+dword_result_t XamContentGetCreator_entry(
+    dword_t user_index, lpvoid_t content_data_ptr, lpdword_t is_creator_ptr,
+    lpqword_t creator_xuid_ptr, pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  if (!is_creator_ptr) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
+  const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
+
+  if (!user) {
+    return X_ERROR_NO_SUCH_USER;
+  }
+
+  XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+
+  auto run = [content_data, xuid = user->xuid(), user_index, is_creator_ptr,
+              creator_xuid_ptr, overlapped_ptr](uint32_t& extended_error,
+                                                uint32_t& length) -> X_RESULT {
+    X_RESULT result = X_ERROR_SUCCESS;
+
+    bool content_exists =
+        kernel_state()->content_manager()->ContentExists(xuid, content_data);
+
+    if (content_exists) {
+      if (content_data.content_type == XContentType::kSavedGame) {
+        // User always creates saves.
+        *is_creator_ptr = 1;
+        if (creator_xuid_ptr) {
+          if (kernel_state()->xam_state()->IsUserSignedIn(user_index)) {
+            const auto& user_profile =
+                kernel_state()->xam_state()->GetUserProfile(user_index);
+            *creator_xuid_ptr = user_profile->xuid();
+          } else {
+            result = X_ERROR_NO_SUCH_USER;
+          }
+        }
+      } else {
+        *is_creator_ptr = 0;
+        if (creator_xuid_ptr) {
+          *creator_xuid_ptr = 0;
+        }
+      }
+    } else {
+      result = X_ERROR_PATH_NOT_FOUND;
+    }
+
+    extended_error = X_HRESULT_FROM_WIN32(result);
+    length = 0;
+
+    if (result && overlapped_ptr) {
+      result = X_ERROR_FUNCTION_FAILED;
+    }
+
+    return result;
+  };
+
+  if (!overlapped_ptr) {
+    uint32_t extended_error, length;
+    return run(extended_error, length);
+  } else {
+    kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
+    return X_ERROR_IO_PENDING;
+  }
+}
+DECLARE_XAM_EXPORT1(XamContentGetCreator, kContent, kImplemented);
+
+dword_result_t XamContentGetThumbnail_entry(
+    dword_t user_index, lpvoid_t content_data_ptr, lpvoid_t buffer_ptr,
+    lpdword_t buffer_size_ptr, pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
+
+  if (!user) {
+    return X_ERROR_NO_SUCH_USER;
+  }
+
+  assert_not_null(buffer_size_ptr);
+  uint32_t buffer_size = *buffer_size_ptr;
+  XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+
+  // Get thumbnail (if it exists).
+  std::vector<uint8_t> buffer;
+  auto result = kernel_state()->content_manager()->GetContentThumbnail(
+      user->xuid(), content_data, &buffer);
+
+  *buffer_size_ptr = uint32_t(buffer.size());
+
+  if (XSUCCEEDED(result)) {
+    // Write data, if we were given a pointer.
+    // This may have just been a size query.
+    if (buffer_ptr) {
+      if (buffer_size < buffer.size()) {
+        // Dest buffer too small.
+        result = X_ERROR_INSUFFICIENT_BUFFER;
+      } else {
+        // Copy data.
+        std::memcpy((uint8_t*)buffer_ptr, buffer.data(), buffer.size());
+      }
+    }
+  }
+
+  if (overlapped_ptr) {
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
+    return X_ERROR_IO_PENDING;
+  } else {
+    return result;
+  }
+}
+DECLARE_XAM_EXPORT1(XamContentGetThumbnail, kContent, kImplemented);
+
+dword_result_t XamContentSetThumbnail_entry(
+    dword_t user_index, lpvoid_t content_data_ptr, lpvoid_t buffer_ptr,
+    dword_t buffer_size, pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
+
+  if (!user) {
+    return X_ERROR_NO_SUCH_USER;
+  }
+
+  XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+
+  // Buffer is PNG data.
+  auto buffer = std::vector<uint8_t>((uint8_t*)buffer_ptr,
+                                     (uint8_t*)buffer_ptr + buffer_size);
+  auto result = kernel_state()->content_manager()->SetContentThumbnail(
+      user->xuid(), content_data, std::move(buffer));
+
+  if (overlapped_ptr) {
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
+    return X_ERROR_IO_PENDING;
+  } else {
+    return result;
+  }
+}
+DECLARE_XAM_EXPORT1(XamContentSetThumbnail, kContent, kImplemented);
+
+dword_result_t xeXamContentDelete(dword_t user_index, lpvoid_t content_data_ptr,
+                                  dword_t content_data_size,
+                                  pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  uint64_t xuid = 0;
+  XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+  if (content_data_size == sizeof(XCONTENT_AGGREGATE_DATA)) {
+    content_data = *content_data_ptr.as<XCONTENT_AGGREGATE_DATA*>();
+  }
+
+  if (user_index != XUserIndexNone) {
+    const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
+
+    if (!user) {
+      return X_ERROR_NO_SUCH_USER;
+    }
+
+    xuid = user->xuid();
+  }
+
+  auto result =
+      kernel_state()->content_manager()->DeleteContent(xuid, content_data);
+
+  if (overlapped_ptr) {
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
+    return X_ERROR_IO_PENDING;
+  } else {
+    return result;
+  }
+}
+
+dword_result_t XamContentDelete_entry(
+    dword_t user_index, lpvoid_t content_data_ptr,
+    pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  return xeXamContentDelete(user_index, content_data_ptr, sizeof(XCONTENT_DATA),
+                            overlapped_ptr);
+}
+DECLARE_XAM_EXPORT1(XamContentDelete, kContent, kImplemented);
+
+dword_result_t XamContentDeleteInternal_entry(
+    lpvoid_t content_data_ptr, pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  // INFO: Analysis of xam.xex shows that "internal" functions are wrappers with
+  // 0xFE as user_index.
+  // In XAM content size is set to 0x200.
+  return xeXamContentDelete(XUserIndexNone, content_data_ptr,
+                            sizeof(XCONTENT_AGGREGATE_DATA), overlapped_ptr);
+}
+DECLARE_XAM_EXPORT1(XamContentDeleteInternal, kContent, kImplemented);
+
+typedef struct {
+  xe::be<uint32_t> stringTitlePtr;
+  xe::be<uint32_t> stringTextPtr;
+  xe::be<uint32_t> stringBtnMsgPtr;
+} X_SWAPDISC_ERROR_MESSAGE;
+static_assert_size(X_SWAPDISC_ERROR_MESSAGE, 12);
+
+dword_result_t XamSwapDisc_entry(
+    dword_t disc_number, pointer_t<X_KEVENT> completion_handle,
+    pointer_t<X_SWAPDISC_ERROR_MESSAGE> error_message) {
+  xex2_opt_execution_info* info = nullptr;
+  if (kernel_state()->GetExecutableModule()->GetOptHeader(
+          XEX_HEADER_EXECUTION_INFO, &info) != X_STATUS_SUCCESS ||
+      !info) {
+    XELOGE("XamSwapDisc: title has no execution info header");
+    return X_ERROR_INVALID_PARAMETER;
+  }
+  if (!completion_handle || !error_message) {
+    XELOGE("XamSwapDisc: null completion handle or error message");
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
+  XELOGI(
+      "XamSwapDisc: title {:08X} requested disc {} of {} (boot disc {}) on "
+      "guest thread {:08X}",
+      uint32_t(info->title_id), uint32_t(disc_number),
+      uint8_t(info->disc_count), uint8_t(info->disc_number),
+      XThread::GetCurrentThreadId());
+
+  // Validate the requested disc number
+  if (disc_number < 1 || disc_number > info->disc_count) {
+    XELOGE("XamSwapDisc: Invalid disc number {} (valid range: 1-{})",
+           uint32_t(disc_number), uint8_t(info->disc_count));
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
+  auto completion_event = [completion_handle]() -> void {
+    xboxkrnl::xeKeSetEvent(completion_handle, 1, 0);
+  };
+
+  // info->disc_number is the BOOT disc and is never rewritten.
+  const uint32_t mounted_disc =
+      kernel_state()->emulator()->current_disc_number()
+          ? kernel_state()->emulator()->current_disc_number()
+          : uint32_t(info->disc_number);
+  if (mounted_disc == disc_number) {
+    completion_event();
+    return X_ERROR_SUCCESS;
+  }
+
+  auto filesystem = kernel_state()->file_system();
+  // Mount to Cdrom0 so the game: symlink points to the new disc
+  auto mount_path = "\\Device\\Cdrom0";
+
+  // Unmount the current disc
+  if (filesystem->ResolvePath(mount_path) != NULL) {
+    filesystem->UnregisterDevice(mount_path);
+  }
+
+  std::u16string text_message = xe::load_and_swap<std::u16string>(
+      kernel_state()->memory()->TranslateVirtual(error_message->stringTextPtr));
+
+  std::string error_dialog_message;
+
+  // Loop until user provides the correct disc
+  while (true) {
+    const std::filesystem::path new_disc_path =
+        kernel_state()->emulator()->GetNewDiscPath(
+            xe::to_utf8(text_message) + "\n\n" + error_dialog_message,
+            disc_number);
+    XELOGI("XamSwapDisc: GetNewDiscPath returned path {}.",
+           new_disc_path.string().c_str());
+
+    // Clear the error message for next iteration
+    error_dialog_message.clear();
+
+    // Check if user cancelled the disc selection - don't proceed with wrong
+    // disc
+    if (new_disc_path.empty()) {
+      // Re-prompting would spin a guest thread against an instant-returning
+      // provider. The drive stays empty, as the guest's own eject left it.
+      XELOGI("XamSwapDisc: disc selection cancelled");
+      completion_event();
+      return X_ERROR_CANCELLED;
+    }
+
+    // Mount the new disc
+    auto mount_result =
+        kernel_state()->emulator()->MountPath(new_disc_path, mount_path);
+    if (mount_result != X_ERROR_SUCCESS) {
+      XELOGE("XamSwapDisc: Failed to mount disc at path: {}",
+             new_disc_path.string());
+      error_dialog_message =
+          "ERROR: Failed to mount the selected disc image.\n"
+          "Please select a valid disc image file.";
+      continue;  // Ask again
+    }
+
+    // Validate the mounted disc
+    auto* device = filesystem->GetDevice(mount_path);
+    if (!device) {
+      XELOGE("XamSwapDisc: Failed to get mounted device");
+      filesystem->UnregisterDevice(mount_path);
+      error_dialog_message =
+          "ERROR: Failed to access the mounted disc.\n"
+          "Please try again with a different file.";
+      continue;  // Ask again
+    }
+
+    // Try to cast to XContentContainerDevice to access disc metadata
+    auto* container_device =
+        dynamic_cast<vfs::XContentContainerDevice*>(device);
+    if (container_device) {
+      const auto* header = container_device->GetContainerHeader();
+      if (header) {
+        const auto& exec_info = header->content_metadata.execution_info;
+
+        // Validate disc number matches what was requested
+        if (exec_info.disc_number && exec_info.disc_number != disc_number) {
+          XELOGE(
+              "XamSwapDisc: Disc number mismatch! Requested disc {}, but "
+              "mounted disc is disc {}.",
+              uint32_t(disc_number), uint8_t(exec_info.disc_number));
+          filesystem->UnregisterDevice(mount_path);
+          error_dialog_message = fmt::format(
+              "ERROR: Wrong Disc!\n\n"
+              "Requested: Disc {}\n"
+              "Inserted: Disc {}\n\n"
+              "Please insert the correct disc.",
+              uint32_t(disc_number), uint8_t(exec_info.disc_number));
+          continue;  // Ask again
+        }
+
+        // Validate title ID matches
+        if (exec_info.title_id != info->title_id) {
+          XELOGE(
+              "XamSwapDisc: Title ID mismatch! Expected {:08X}, but mounted "
+              "disc has {:08X}.",
+              uint32_t(info->title_id), uint32_t(exec_info.title_id));
+          filesystem->UnregisterDevice(mount_path);
+          error_dialog_message = fmt::format(
+              "ERROR: Wrong Game!\n\n"
+              "This disc does not belong to the current game.\n\n"
+              "Expected Title ID: {:08X}\n"
+              "Inserted Title ID: {:08X}\n\n"
+              "Please insert the correct disc.",
+              uint32_t(info->title_id), uint32_t(exec_info.title_id));
+          continue;  // Ask again
+        }
+
+        // Validate disc count matches
+        if (exec_info.disc_count != info->disc_count) {
+          XELOGW(
+              "XamSwapDisc: Disc count mismatch! Expected {} discs, but "
+              "mounted disc indicates {} discs",
+              uint8_t(info->disc_count), uint8_t(exec_info.disc_count));
+        }
+
+        XELOGI(
+            "XamSwapDisc: Successfully validated and mounted disc {} of {} "
+            "(Title ID: {:08X}, Media ID: {:08X})",
+            uint8_t(exec_info.disc_number), uint8_t(exec_info.disc_count),
+            uint32_t(exec_info.title_id), uint32_t(exec_info.media_id));
+
+        std::string disc_label;
+        if (exec_info.disc_count > 1 && exec_info.disc_number > 0) {
+          disc_label = fmt::format("Disc {}", uint8_t(exec_info.disc_number));
+        }
+        kernel_state()->emulator()->RecordDisc(info->title_id, disc_label,
+                                               new_disc_path);
+
+        // Update the host_path in loader_data so title restarts use the new
+        // disc
+        auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
+        if (xam) {
+          xam->loader_data().host_path = xe::path_to_utf8(new_disc_path);
+        }
+
+        kernel_state()->emulator()->set_current_disc_number(
+            exec_info.disc_number);
+
+        // Notify UI of disc swap for title bar update
+        auto on_disc_swap = kernel_state()->emulator()->on_disc_swap();
+        if (on_disc_swap) {
+          on_disc_swap(exec_info.disc_number);
+        }
+
+        // Success - break out of the loop
+        break;
+      }
+    } else {
+      // Disc images are not containers, so the checks above skip them; without
+      // this any file is accepted as any disc.
+      auto image_meta = vfs::ExtractIsoMetadata(new_disc_path);
+      if (!image_meta) {
+        image_meta = vfs::ExtractZarMetadata(new_disc_path);
+      }
+      if (image_meta) {
+        if (image_meta->title_id != info->title_id) {
+          XELOGE("XamSwapDisc: disc belongs to title {:08X}, expected {:08X}",
+                 image_meta->title_id, uint32_t(info->title_id));
+          filesystem->UnregisterDevice(mount_path);
+          error_dialog_message =
+              "ERROR: That disc belongs to a different game.\n"
+              "Please select a disc for this title.";
+          continue;
+        }
+        if (image_meta->disc_number &&
+            image_meta->disc_number != disc_number) {
+          XELOGE("XamSwapDisc: disc {} selected, {} requested",
+                 uint32_t(image_meta->disc_number), uint32_t(disc_number));
+          filesystem->UnregisterDevice(mount_path);
+          error_dialog_message =
+              "ERROR: That is the wrong disc.\n"
+              "Please select the requested disc.";
+          continue;
+        }
+      } else {
+        XELOGW("XamSwapDisc: could not read a header from {}; accepting it",
+               new_disc_path.string());
+      }
+
+      // Update the host_path in loader_data so title restarts use the new disc
+      auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
+      if (xam) {
+        xam->loader_data().host_path = xe::path_to_utf8(new_disc_path);
+      }
+
+      kernel_state()->emulator()->set_current_disc_number(disc_number);
+      kernel_state()->emulator()->RecordDisc(
+          info->title_id, std::to_string(uint32_t(disc_number)),
+          new_disc_path);
+      auto on_disc_swap = kernel_state()->emulator()->on_disc_swap();
+      if (on_disc_swap) {
+        on_disc_swap(disc_number);
+      }
+      break;
+    }
+  }
+
+  completion_event();
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamSwapDisc, kContent, kSketchy);
+
+dword_result_t XamLoaderGetDvdTrayState_entry() {
+  return static_cast<uint8_t>(kernel_state()->smc()->GetTrayState());
+}
+DECLARE_XAM_EXPORT1(XamLoaderGetDvdTrayState, kNone, kImplemented);
+
+void XamLoaderGetMediaInfoEx_entry(lpdword_t media_type, lpdword_t unk2,
+                                   lpdword_t unk3) {
+  if (media_type) {
+    *media_type = X_DVD_DISC_STATE::XBOX_360_GAME_DISC;
+  }
+  if (unk2) {
+    *unk2 = 0;
+  }
+  if (unk3) {
+    *unk3 = 0;
+  }
+}
+DECLARE_XAM_EXPORT1(XamLoaderGetMediaInfoEx, kNone, kStub);
+
+void XamLoaderGetMediaInfo_entry(lpdword_t media_type, lpdword_t unk2) {
+  XamLoaderGetMediaInfoEx_entry(media_type, unk2, 0);
+}
+DECLARE_XAM_EXPORT1(XamLoaderGetMediaInfo, kNone, kStub);
+
+dword_result_t XamContentLaunchImageFromFileInternal_entry(
+    lpstring_t image_location, lpstring_t xex_name, dword_t unk) {
+  const std::string image_path = static_cast<std::string>(image_location);
+  const std::string xex_name_ = static_cast<std::string>(xex_name);
+
+  vfs::Entry* entry = kernel_state()->file_system()->ResolvePath(image_path);
+
+  if (!entry) {
+    return X_STATUS_NO_SUCH_FILE;
+  }
+
+  const std::filesystem::path host_path =
+      kernel_state()->emulator()->content_root() / entry->name();
+  if (!std::filesystem::exists(host_path)) {
+    std::atomic<uint64_t> progress{0};
+
+    vfs::VirtualFileSystem::ExtractContentFile(
+        entry, kernel_state()->emulator()->content_root(), progress, true);
+  }
+
+  // In-process relaunch is disabled on macOS — see XamLoaderLaunchTitle.
+#if !XE_PLATFORM_MAC
+  if (cvars::in_process_title_relaunch) {
+    auto* emulator = kernel_state()->emulator();
+    auto host_path_utf8 = xe::path_to_utf8(host_path);
+    std::thread([emulator, host_path_utf8, module = xex_name_]() mutable {
+      emulator->RelaunchTitle(host_path_utf8, module, 0, {});
+    }).detach();
+    // Park off guest code until RelaunchTitle terminates us (Suspend can return
+    // on POSIX).
+    XThread::GetCurrentThread()->Suspend(nullptr);
+    while (true) {
+      xe::threading::NanoSleep(int64_t(1'000'000'000));
+    }
+  }
+#endif  // !XE_PLATFORM_MAC
+
+  auto on_launch_new_title = kernel_state()->emulator()->on_launch_new_title();
+  if (on_launch_new_title) {
+    XELOGI("XamContentLaunchImageFromFileInternal: spawning new title process");
+    on_launch_new_title(xe::path_to_utf8(host_path), xex_name_, 0, "");
+  }
+
+  kernel_state()->TerminateTitle();
+  return X_ERROR_SUCCESS;
+}
+
+DECLARE_XAM_EXPORT1(XamContentLaunchImageFromFileInternal, kContent, kStub);
+
+dword_result_t XamContentLaunchImageInternal_entry(lpvoid_t content_data_ptr,
+                                                   lpstring_t xex_path) {
+  XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+
+  // title_id is written into first 8 characters of filename
+  const uint32_t title_id = xe::string_util::from_string<uint32_t>(
+      content_data.file_name().substr(0, 8), true);
+
+  // This should be done via content_manager, however as it isn't capable of
+  // such action we need to improvise.
+  const std::string package_path =
+      fmt::format("GAME:/Content/0000000000000000/{:08X}/{:08X}/{}", title_id,
+                  static_cast<uint32_t>(content_data.content_type.get()),
+                  content_data.file_name());
+
+  auto entry = kernel_state()->file_system()->ResolvePath(package_path);
+
+  if (!entry) {
+    return X_STATUS_NO_SUCH_FILE;
+  }
+
+  const std::filesystem::path host_path =
+      kernel_state()->emulator()->content_root() / entry->name();
+
+  if (!std::filesystem::exists(host_path)) {
+    std::atomic<uint64_t> progress{0};
+    kernel_state()->file_system()->ExtractContentFile(
+        entry, kernel_state()->emulator()->content_root(), progress, true);
+  }
+
+  // In-process relaunch is disabled on macOS — see XamLoaderLaunchTitle.
+#if !XE_PLATFORM_MAC
+  if (cvars::in_process_title_relaunch) {
+    auto* emulator = kernel_state()->emulator();
+    auto host_path_utf8 = xe::path_to_utf8(host_path);
+    std::thread([emulator, host_path_utf8,
+                 module = xex_path.value()]() mutable {
+      emulator->RelaunchTitle(host_path_utf8, module, 0, {});
+    }).detach();
+    // Park off guest code until RelaunchTitle terminates us (Suspend can return
+    // on POSIX).
+    XThread::GetCurrentThread()->Suspend(nullptr);
+    while (true) {
+      xe::threading::NanoSleep(int64_t(1'000'000'000));
+    }
+  }
+#endif  // !XE_PLATFORM_MAC
+
+  auto on_launch_new_title = kernel_state()->emulator()->on_launch_new_title();
+  if (on_launch_new_title) {
+    XELOGI("XamContentLaunchImageInternal: spawning new title process");
+    on_launch_new_title(xe::path_to_utf8(host_path), xex_path.value(), 0, "");
+  }
+
+  kernel_state()->TerminateTitle();
+  return X_ERROR_SUCCESS;
+}
+
+DECLARE_XAM_EXPORT1(XamContentLaunchImageInternal, kContent, kStub);
+
+void XamContentRegisterChangeCallback_entry(dword_t callback) {
+  kernel_state()->xam_state()->SetContentRegisterCallback(callback);
+}
+DECLARE_XAM_EXPORT1(XamContentRegisterChangeCallback, kContent, kImplemented);
+
+dword_result_t XamContentGetDeviceVolumePath_entry(dword_t device_id,
+                                                   lpvoid_t path_ptr,
+                                                   dword_t path_size,
+                                                   dword_t append_backslash) {
+  std::string volume_path = "hdd0\\";
+  if (device_id != static_cast<uint32_t>(DummyDeviceId::HDD)) {
+    return X_ERROR_FUNCTION_FAILED;
+  }
+
+  char* path =
+      kernel_memory()->TranslateVirtual<char*>(path_ptr.guest_address());
+
+  string_util::copy_truncating(path, volume_path, path_size);
+
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamContentGetDeviceVolumePath, kContent, kStub);
+}  // namespace xam
+}  // namespace kernel
+}  // namespace xe
+
+DECLARE_XAM_EMPTY_REGISTER_EXPORTS(Content);

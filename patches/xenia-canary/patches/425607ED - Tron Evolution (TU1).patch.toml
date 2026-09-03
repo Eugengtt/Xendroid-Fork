@@ -1,0 +1,57 @@
+title_name = "Tron: Evolution" # Disney TRON: Evolution, TU1
+title_id = "425607ED" # BV-2029
+hash = "91B424CA633016BD" # default.xex
+#media_id = "4BB00DF7" # Disc (USA, Europe): http://redump.org/disc/18770
+
+[[patch]]
+    name = "Unlock FPS"
+    desc = "See note about framerate patches in the README."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82585dd0
+        value = 0x60000000
+    [[patch.be8]]
+        address = 0x82be2537
+        value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Disable Lens Flares"
+    desc = "Fixes unoccluded bright lights on-screen."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8291401c
+        value = 0x39400000
+
+[[patch]]
+    name = "Disable Radial Blur"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82874674
+        value = 0x39600000
+
+[[patch]]
+    name = "16x Anisotropic Filtering"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82a087e4
+        value = 0x38a00010
+
+[[patch]]
+    name = "Show Frametime"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x83658f5c
+        value = 0x01
+    [[patch.be8]]
+        address = 0x83658f64
+        value = 0x01

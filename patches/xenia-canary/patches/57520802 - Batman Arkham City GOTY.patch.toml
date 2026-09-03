@@ -1,0 +1,70 @@
+title_name = "Batman: Arkham City: Game of the Year Edition"
+title_id = "57520802" # WR-2050
+hash = [
+    "BD0E0E99E84F554B" # Disc 1, default.xex
+#    "A2E1B657B4B6F71E" # Disc 2, default.xex
+]
+#media_id = [
+#    "5D278B66", # Disc 1 (USA, Europe): http://redump.org/disc/50850
+#    "69B8A24F"  # Disc 2 (USA, Europe): http://redump.org/disc/50851
+#]
+
+[[patch]]
+    name = "Unlock FPS"
+    desc = "See note about framerate patches in the README."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8244f594
+        value = 0x60000000
+    [[patch.be8]]
+        address = 0x8224f803
+        value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Disable Lens Flares"
+    desc = "Fixes unoccluded bright lights on-screen."
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8270e550
+        value = 0x39400000
+
+[[patch]]
+    name = "16x Anisotropic Filtering"
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x827eb480
+        value = 0x38a00010
+
+[[patch]]
+    name = "Debug Menu"
+    desc = "Activate with RB+Start."
+    author = "dron_3" # https://dron-3.blogspot.com/2020/11/batman-arkham-series-xbox-360-debug-menu.html
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x824370b8
+        value = 0x38600000
+
+[[patch]]
+    name = "Disable Motion Blur"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8273d9f8
+        value = 0x39600000
+
+[[patch]]
+    name = "Skip intro"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x820906f1
+        value = 0x60000000

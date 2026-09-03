@@ -1,0 +1,39 @@
+title_name = "State of Decay"
+title_id = "584111E8" # XA-4584
+hash = "DE77FE6490F9E7F5" # default.xex
+#media_id = "6F32E742" # XBLA: 575B340E3A01D77D7C71736AC3B63886D02F23D958
+
+[[patch]]
+    name = "Unlock FPS"
+    desc = "See note about framerate patches in the README."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x830d1400
+        value = 0x60000000
+    [[patch.be8]]
+        address = 0x8376f0d3
+        value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Disable most shadows"
+    desc = "Improves visibility in shaded areas. Best paired with Vulkan for better remaining shadows. Can be improved to properly disable all shadows."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x831148f8
+        value = 0x39400000
+    [[patch.be32]]
+        address = 0x83114944
+        value = 0x39400000
+
+[[patch]]
+    name = "Skip intro"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x820f4c2c
+        value = 0x60000000

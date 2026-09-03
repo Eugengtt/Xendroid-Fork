@@ -1,0 +1,80 @@
+title_name = "Mirror's Edge" # TU2
+title_id = "45410850" # EA-2128
+hash = "64079AA28F886F3C" # default.xex
+#media_id = [
+#    "426CA5A2", # Disc (Europe): http://redump.org/disc/11415
+#    "214A9845", # Disc (USA):    http://redump.org/disc/15254
+#]
+
+[[patch]]
+    name = "Unlock FPS"
+    desc = "See note about framerate patches in the README."
+    author = "illusion, boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8255d534
+        value = 0x60000000
+    [[patch.be8]]
+        address = 0x82830d23
+        value = 0x01
+
+[[patch]]
+    name = "Dynamic Lighting & Shadows Shading Fix"
+    desc = "Solves most dynamic lighting artifacts, like splotchy skin complexion & invisible hands and feet, caused by an issue with MSAA tiling."
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x823a1718
+        value = 0x39200000
+    [[patch.be32]]
+        address = 0x823a1788
+        value = 0x39200000
+
+[[patch]]
+    name = "Disable Lens Flares"
+    desc = "Fixes unoccluded bright lights on-screen."
+    author = "boma, Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x826c5804
+        value = 0x39400000
+
+[[patch]]
+    name = "16x Anisotropic Filtering"
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8238ffbc
+        value = 0x39600010
+
+[[patch]]
+    name = "Disable Bloom & Depth of Field"
+    author = "illusion"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x82719878
+        value = 0x40
+
+[[patch]]
+    name = "Disable Coalesced hash check"
+    desc = "Allows for Coalesced modifications."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x82a1b8ef
+        value = 0x00
+
+[[patch]]
+    name = "Show FPS"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x83115d0b # stat xunit
+        value = 0x07

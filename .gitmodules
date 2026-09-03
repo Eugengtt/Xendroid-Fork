@@ -1,0 +1,135 @@
+[submodule "third_party/xbyak"]
+	path = emulator-core/src/main/cpp/xenia/third_party/xbyak
+	url = https://github.com/herumi/xbyak.git
+[submodule "third_party/imgui"]
+	path = emulator-core/src/main/cpp/xenia/third_party/imgui
+	url = https://github.com/ocornut/imgui.git
+[submodule "third_party/catch"]
+	path = emulator-core/src/main/cpp/xenia/third_party/catch
+	url = https://github.com/catchorg/Catch2.git
+[submodule "third_party/snappy"]
+	path = emulator-core/src/main/cpp/xenia/third_party/snappy
+	url = https://github.com/google/snappy.git
+	ignore = dirty
+[submodule "third_party/discord-rpc"]
+	path = emulator-core/src/main/cpp/xenia/third_party/discord-rpc
+	url = https://github.com/discordapp/discord-rpc.git
+[submodule "third_party/rapidjson"]
+	path = emulator-core/src/main/cpp/xenia/third_party/rapidjson
+	url = https://github.com/Tencent/rapidjson.git
+[submodule "third_party/aes_128"]
+	path = emulator-core/src/main/cpp/xenia/third_party/aes_128
+	url = https://github.com/openluopworld/aes_128.git
+[submodule "third_party/capstone"]
+	path = emulator-core/src/main/cpp/xenia/third_party/capstone
+	url = https://github.com/capstone-engine/capstone.git
+[submodule "third_party/tomlplusplus"]
+	path = emulator-core/src/main/cpp/xenia/third_party/tomlplusplus
+	url = https://github.com/marzer/tomlplusplus.git
+[submodule "third_party/cxxopts"]
+	path = emulator-core/src/main/cpp/xenia/third_party/cxxopts
+	url = https://github.com/jarro2783/cxxopts.git
+[submodule "third_party/utfcpp"]
+	path = emulator-core/src/main/cpp/xenia/third_party/utfcpp
+	url = https://github.com/nemtrif/utfcpp.git
+[submodule "third_party/fmt"]
+	path = emulator-core/src/main/cpp/xenia/third_party/fmt
+	url = https://github.com/fmtlib/fmt.git
+[submodule "third_party/disruptorplus"]
+	path = emulator-core/src/main/cpp/xenia/third_party/disruptorplus
+	url = https://github.com/xenia-canary/disruptorplus.git
+[submodule "third_party/DirectXShaderCompiler"]
+	path = emulator-core/src/main/cpp/xenia/third_party/DirectXShaderCompiler
+	url = https://github.com/microsoft/DirectXShaderCompiler.git
+[submodule "third_party/date"]
+	path = emulator-core/src/main/cpp/xenia/third_party/date
+	url = https://github.com/HowardHinnant/date.git
+[submodule "third_party/xxhash"]
+	path = emulator-core/src/main/cpp/xenia/third_party/xxhash
+	url = https://github.com/Cyan4973/xxHash.git
+[submodule "third_party/FFmpeg"]
+	path = emulator-core/src/main/cpp/xenia/third_party/FFmpeg
+	url = https://github.com/has207/FFmpeg.git
+	branch = xmaframes
+[submodule "third_party/FidelityFX-CAS"]
+	path = emulator-core/src/main/cpp/xenia/third_party/FidelityFX-CAS
+	url = https://github.com/GPUOpen-Effects/FidelityFX-CAS.git
+[submodule "third_party/FidelityFX-FSR"]
+	path = emulator-core/src/main/cpp/xenia/third_party/FidelityFX-FSR
+	url = https://github.com/GPUOpen-Effects/FidelityFX-FSR.git
+[submodule "third_party/Vulkan-Headers"]
+	path = emulator-core/src/main/cpp/xenia/third_party/Vulkan-Headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers.git
+[submodule "third_party/glslang"]
+	path = emulator-core/src/main/cpp/xenia/third_party/glslang
+	url = https://github.com/KhronosGroup/glslang.git
+[submodule "third_party/VulkanMemoryAllocator"]
+	path = emulator-core/src/main/cpp/xenia/third_party/VulkanMemoryAllocator
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+[submodule "third_party/zstd"]
+	path = emulator-core/src/main/cpp/xenia/third_party/zstd
+	url = https://github.com/facebook/zstd.git
+[submodule "third_party/zarchive"]
+	path = emulator-core/src/main/cpp/xenia/third_party/zarchive
+	url = https://github.com/exzap/ZArchive.git
+[submodule "third_party/zlib-ng"]
+	path = emulator-core/src/main/cpp/xenia/third_party/zlib-ng
+	url = https://github.com/zlib-ng/zlib-ng.git
+	ignore = dirty
+[submodule "third_party/pugixml"]
+	path = emulator-core/src/main/cpp/xenia/third_party/pugixml
+	url = https://github.com/zeux/pugixml.git
+[submodule "third_party/libusb"]
+	path = emulator-core/src/main/cpp/xenia/third_party/libusb
+	url = https://github.com/libusb/libusb.git
+[submodule "third_party/cpplint"]
+	path = emulator-core/src/main/cpp/xenia/third_party/cpplint
+	url = https://github.com/cpplint/cpplint.git
+[submodule "third_party/miniaudio"]
+	path = emulator-core/src/main/cpp/xenia/third_party/miniaudio
+	url = https://github.com/mackron/miniaudio.git
+[submodule "third_party/DirectX-Headers"]
+	path = emulator-core/src/main/cpp/xenia/third_party/DirectX-Headers
+	url = https://github.com/microsoft/DirectX-Headers.git
+[submodule "third_party/metal-cpp"]
+	path = emulator-core/src/main/cpp/xenia/third_party/metal-cpp
+	url = https://github.com/bkaradzic/metal-cpp.git
+	branch = metal-cpp_26
+[submodule "third_party/asio"]
+	path = emulator-core/src/main/cpp/xenia/third_party/asio
+	url = https://github.com/chriskohlhoff/asio.git
+[submodule "third_party/xbyak_aarch64"]
+	path = emulator-core/src/main/cpp/xenia/third_party/xbyak_aarch64
+	url = https://github.com/fujitsu/xbyak_aarch64.git
+[submodule "third_party/SPIRV-Headers"]
+	path = emulator-core/src/main/cpp/xenia/third_party/SPIRV-Headers
+	url = https://github.com/KhronosGroup/SPIRV-Headers.git
+	branch = vulkan-sdk-1.4.341
+[submodule "third_party/SPIRV-Tools"]
+	path = emulator-core/src/main/cpp/xenia/third_party/SPIRV-Tools
+	url = https://github.com/KhronosGroup/SPIRV-Tools.git
+	branch = vulkan-sdk-1.4.341
+[submodule "third_party/SPIRV-Cross"]
+	path = emulator-core/src/main/cpp/xenia/third_party/SPIRV-Cross
+	url = https://github.com/KhronosGroup/SPIRV-Cross.git
+	branch = vulkan-sdk-1.4.341
+[submodule "third_party/wxWidgets"]
+	path = emulator-core/src/main/cpp/xenia/third_party/wxWidgets
+	url = https://github.com/wxWidgets/wxWidgets.git
+	branch = v3.3.2
+[submodule "third_party/MoltenVK"]
+	path = emulator-core/src/main/cpp/xenia/third_party/MoltenVK
+	url = https://github.com/KhronosGroup/MoltenVK.git
+[submodule "third_party/cereal"]
+	path = emulator-core/src/main/cpp/xenia/third_party/cereal
+	url = https://github.com/USCiLab/cereal.git
+[submodule "third_party/SDL3"]
+	path = emulator-core/src/main/cpp/xenia/third_party/SDL3
+	url = https://github.com/libsdl-org/SDL.git
+	ignore = dirty
+[submodule "third_party/boost_context/context"]
+	path = emulator-core/src/main/cpp/xenia/third_party/boost_context/context
+	url = https://github.com/boostorg/context.git
+[submodule "third_party/game-patches"]
+	path = patches/xenia-canary
+	url = https://github.com/xenia-canary/game-patches

@@ -1,0 +1,49 @@
+title_name = "The Last Remnant"
+title_id = "535107DA" # SQ-2010
+hash = "E0184D285EBBE8B8" # default.xex
+#media_id = [
+#    "2D6FF16D", # Disc 1 (USA): http://redump.org/disc/12494
+#    "7205C131", # Disc 2 (USA): http://redump.org/disc/12495
+#]
+
+[[patch]]
+    name = "Unlock FPS"
+    desc = "See note about framerate patches in the README. Menu/UI navigation speed tied to FPS."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82cd3410
+        value = 0x60000000
+    [[patch.be8]]
+        address = 0x82f4c83b
+        value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Black Shading Fix"
+    desc = "Disables MSAA"
+    author = "HouseofTudor, Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x8347b98b
+        value = 0x04
+
+[[patch]]
+    name = "16x Anisotropic Filtering"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x829ae308
+        value = 0x38a00010
+
+[[patch]]
+    name = "Disable Coalesced hash check"
+    desc = "Allows for Coalesced modifications."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x82f2d97f
+        value = 0x00

@@ -1,0 +1,1590 @@
+# Greek translation for xenia-edge.
+# Initial seed translation; refresh by running `xb i18n` and copying new
+# msgids over from xenia.pot.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: xenia-edge\n"
+"POT-Creation-Date: 2026-05-23 04:33+0000\n"
+"Language: el\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: src/xenia/ui/game_list_panel_wx.cc:596
+msgid ""
+"\n"
+"\n"
+"Browse for the file?"
+msgstr ""
+"\n"
+"\n"
+"Αναζήτηση του αρχείου?"
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:55
+msgid "   %zu already installed"
+msgstr "   %zu ήδη εγκατεστημένα"
+
+#: src/xenia/ui/game_list_panel_wx.cc:1240
+msgid " (%zu discs)"
+msgstr " (%zu δίσκοι)"
+
+#: src/xenia/ui/install_progress_dialog_wx.cc:185
+msgid " - %s (%08X)"
+msgstr " — %s (%08X)"
+
+#: src/xenia/ui/game_config_dialog_wx.cc:285
+msgid "%08X - Config Overrides"
+msgstr ""
+
+#: src/xenia/ui/patches_dialog_wx.cc:37
+msgid "%s (%08X)"
+msgstr "%s (%08X)"
+
+#: src/xenia/ui/game_config_dialog_wx.cc:286
+msgid "%s (%08X) - Config Overrides"
+msgstr "%s (%08X) — Παρακάμψεις ρυθμίσεων"
+
+#: src/xenia/app/emulator_window.cc:1995
+msgid "%s (Slot %d)"
+msgstr "%s (Θέση %d)"
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:52
+msgid "%zu directories scanned   %zu files probed   %zu games found"
+msgstr ""
+"%zu κατάλογοι σαρώθηκαν   %zu αρχεία ελέγχθηκαν   %zu παιχνίδια βρέθηκαν"
+
+#: src/xenia/app/emulator_window.cc:895
+msgid "&About..."
+msgstr "Σχετικά(&A)…"
+
+#: src/xenia/app/emulator_window.cc:794
+msgid "&Add Games..."
+msgstr "Προσθήκη παιχνιδιών(&A)…"
+
+#: src/xenia/app/emulator_window.cc:864
+msgid "&Audio"
+msgstr "Ήχος(&A)"
+
+#: src/xenia/app/emulator_window.cc:824
+msgid "&Configuration"
+msgstr "Διαμόρφωση(&C)"
+
+#: src/xenia/app/emulator_window.cc:898
+msgid "&Controllers"
+msgstr "Χειριστήρια(&C)"
+
+#: src/xenia/app/emulator_window.cc:786
+msgid "&File"
+msgstr "Αρχείο(&F)"
+
+#: src/xenia/app/emulator_window.cc:884
+msgid "&Help"
+msgstr "Βοήθεια(&H)"
+
+#: src/xenia/app/emulator_window.cc:877
+msgid "&Install Content..."
+msgstr "Εγκατάσταση περιεχομένου(&I)…"
+
+#: src/xenia/app/emulator_window.cc:826
+msgid "&Main"
+msgstr "Γενικά(&M)"
+
+#: src/xenia/app/emulator_window.cc:789
+msgid "&Open..."
+msgstr "Άνοιγμα(&O)…"
+
+#: src/xenia/app/emulator_window.cc:816
+msgid "&Profile"
+msgstr "Προφίλ(&P)"
+
+#: src/xenia/app/emulator_window.cc:799
+msgid "&Stop Game"
+msgstr "Διακοπή παιχνιδιού(&S)"
+
+#: src/xenia/app/emulator_window.cc:874
+msgid "&Tools"
+msgstr "Εργαλεία(&T)"
+
+#: src/xenia/app/emulator_window.cc:853
+msgid "&View"
+msgstr "Προβολή(&V)"
+
+#: src/xenia/app/emulator_window.cc:867
+msgid "&Volume"
+msgstr "Ένταση(&V)"
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:62
+msgid "(unknown title)"
+msgstr "(άγνωστος τίτλος)"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:209
+msgid "50Hz"
+msgstr "50 Hz"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:210
+msgid "60Hz"
+msgstr "60 Hz"
+
+#: src/xenia/ui/game_list_panel_wx.cc:304
+msgid "Achievements"
+msgstr "Επιτεύγματα"
+
+#: src/xenia/app/emulator_window.cc:2257
+msgid "Add Games"
+msgstr "Προσθήκη παιχνιδιών"
+
+#: src/xenia/ui/game_config_dialog_wx.cc:187
+#: src/xenia/ui/game_config_dialog_wx.cc:468
+msgid "Add Override"
+msgstr "Προσθήκη παράκαμψης"
+
+#: src/xenia/app/emulator_window.cc:2258
+msgid "Add games"
+msgstr "Προσθήκη παιχνιδιών"
+
+#: src/xenia/ui/game_config_dialog_wx.cc:307
+msgid "Add..."
+msgstr "Προσθήκη…"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:327
+msgid "Advanced..."
+msgstr "Σύνθετες…"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:67
+msgid "Albania"
+msgstr "Αλβανία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:92
+msgid "Algeria"
+msgstr "Αλγερία"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:283
+msgid "All"
+msgstr "Όλα"
+
+#: src/xenia/ui/file_picker_wx.cc:59
+msgid "All Files"
+msgstr "Όλα τα αρχεία"
+
+#: src/xenia/ui/game_config_dialog_wx.cc:468
+msgid "All cvars are already overridden."
+msgstr "Όλα τα cvars έχουν ήδη παρακαμφθεί."
+
+#: src/xenia/app/emulator_window.cc:343
+msgid "Arcade Pad"
+msgstr "Arcade Pad"
+
+#: src/xenia/app/emulator_window.cc:331
+msgid "Arcade Stick"
+msgstr "Arcade Stick"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:69
+msgid "Argentina"
+msgstr "Αργεντινή"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:68
+msgid "Armenia"
+msgstr "Αρμενία"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:252
+msgid "Audio"
+msgstr "Ήχος"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:258
+msgid "Audio Backend:"
+msgstr "Σύστημα ήχου:"
+
+#: src/xenia/app/emulator_window.cc:2402
+msgid "Auto (%s)"
+msgstr "Αυτόματο (%s)"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:71
+msgid "Australia"
+msgstr "Αυστραλία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:70
+msgid "Austria"
+msgstr "Αυστρία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:72
+msgid "Azerbaijan"
+msgstr "Αζερμπαϊτζάν"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:75
+msgid "Bahrain"
+msgstr "Μπαχρέιν"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:79
+msgid "Belarus"
+msgstr "Λευκορωσία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:73
+msgid "Belgium"
+msgstr "Βέλγιο"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:80
+msgid "Belize"
+msgstr "Μπελίζ"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:77
+msgid "Bolivia"
+msgstr "Βολιβία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:78
+msgid "Brazil"
+msgstr "Βραζιλία"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:306
+#: src/xenia/ui/game_config_dialog_wx.cc:98
+msgid "Browse..."
+msgstr "Αναζήτηση…"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:76
+msgid "Brunei Darussalam"
+msgstr "Μπρουνέι"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:74
+msgid "Bulgaria"
+msgstr "Βουλγαρία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:81
+msgid "Canada"
+msgstr "Καναδάς"
+
+#: src/xenia/ui/game_list_panel_wx.cc:1043
+msgid "Canary"
+msgstr "Canary"
+
+#: src/xenia/ui/game_config_dialog_wx.cc:313
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:193
+#: src/xenia/ui/install_progress_dialog_wx.cc:123
+#: src/xenia/ui/profile_editor_dialog_wx.cc:536
+#: src/xenia/ui/quick_settings_dialog_wx.cc:336
+msgid "Cancel"
+msgstr "Ακύρωση"
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:421
+msgid "Cancelled."
+msgstr "Ακυρώθηκε."
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:454
+#: src/xenia/ui/install_progress_dialog_wx.cc:244
+msgid "Cancelling..."
+msgstr "Ακύρωση…"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:391
+msgid "Change Icon..."
+msgstr "Αλλαγή εικονιδίου…"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:84
+msgid "Chile"
+msgstr "Χιλή"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:85
+msgid "China"
+msgstr "Κίνα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:409
+msgid "Clear Icon"
+msgstr "Εκκαθάριση εικονιδίου"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:228
+#: src/xenia/ui/game_list_panel_wx.cc:730
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:206
+#: src/xenia/ui/install_progress_dialog_wx.cc:127
+msgid "Close"
+msgstr "Κλείσιμο"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:86
+msgid "Colombia"
+msgstr "Κολομβία"
+
+#: src/xenia/ui/game_list_panel_wx.cc:1063
+msgid "Compatibility"
+msgstr "Συμβατότητα"
+
+#: src/xenia/ui/install_progress_dialog_wx.cc:221
+msgid "Complete"
+msgstr "Ολοκληρώθηκε"
+
+#: src/xenia/ui/game_list_panel_wx.cc:1028
+msgid "Config Overrides..."
+msgstr "Παρακάμψεις ρυθμίσεων…"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:104
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:419
+msgid "Configuration Manager"
+msgstr "Διαχείριση διαμόρφωσης"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:418
+msgid "Configuration Manager *"
+msgstr "Διαχείριση διαμόρφωσης *"
+
+#: src/xenia/ui/install_progress_dialog_wx.cc:165
+msgid "Content Type: %s"
+msgstr "Τύπος περιεχομένου: %s"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:87
+msgid "Costa Rica"
+msgstr "Κόστα Ρίκα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:602
+msgid "Could not decode the selected image."
+msgstr "Δεν ήταν δυνατή η αποκωδικοποίηση της επιλεγμένης εικόνας."
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:470
+#: src/xenia/ui/quick_settings_dialog_wx.cc:317
+msgid "Country:"
+msgstr "Χώρα:"
+
+#: src/xenia/app/emulator_window.cc:2073
+msgid "Create new..."
+msgstr "Δημιουργία νέου…"
+
+#: src/xenia/app/emulator_window.cc:2077 src/xenia/app/emulator_window.cc:2089
+#: src/xenia/app/emulator_window.cc:2214 src/xenia/app/emulator_window.cc:2221
+#: src/xenia/app/emulator_window.cc:2233
+msgid "Create profile"
+msgstr "Δημιουργία προφίλ"
+
+#: src/xenia/app/emulator_window.cc:2213
+msgid "Create profile && migrate data"
+msgstr "Δημιουργία προφίλ και μεταφορά δεδομένων"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:106
+msgid "Croatia"
+msgstr "Κροατία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:88
+msgid "Czech Republic"
+msgstr "Τσεχική Δημοκρατία"
+
+#: src/xenia/ui/game_list_panel_wx.cc:990
+msgid "DLC"
+msgstr "DLC"
+
+#: src/xenia/app/emulator_window.cc:335
+msgid "Dance Pad"
+msgstr "Πατάκι Χορού"
+
+#: src/xenia/ui/game_list_panel_wx.cc:690
+#: src/xenia/ui/game_list_panel_wx.cc:693
+msgid "Default"
+msgstr "Προεπιλογή"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:263
+msgid "Default Volume:"
+msgstr "Προεπιλεγμένη ένταση:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:90
+msgid "Denmark"
+msgstr "Δανία"
+
+#: src/xenia/ui/game_list_panel_wx.cc:674
+#: src/xenia/ui/game_list_panel_wx.cc:710
+#: src/xenia/ui/game_list_panel_wx.cc:927
+msgid "Disc %zu"
+msgstr "Δίσκος %zu"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:221
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:534
+msgid "Discard Changes"
+msgstr "Απόρριψη αλλαγών"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:534
+msgid "Discard all unsaved changes?"
+msgstr "Απόρριψη όλων των μη αποθηκευμένων αλλαγών?"
+
+#: src/xenia/app/emulator_window.cc:2317
+msgid "Disconnect"
+msgstr "Αποσύνδεση"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:297
+msgid "Discord Rich Presence:"
+msgstr "Discord Rich Presence:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:91
+msgid "Dominican Republic"
+msgstr "Δομινικανή Δημοκρατία"
+
+#: src/xenia/app/emulator_window.cc:809
+msgid "E&xit"
+msgstr "Έξοδος(&X)"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:93
+msgid "Ecuador"
+msgstr "Εκουαδόρ"
+
+#: src/xenia/ui/game_list_panel_wx.cc:648
+msgid "Edit Discs"
+msgstr "Επεξεργασία δίσκων"
+
+#: src/xenia/ui/game_list_panel_wx.cc:937
+msgid "Edit Discs..."
+msgstr "Επεξεργασία δίσκων…"
+
+#: src/xenia/app/emulator_window.cc:2053
+msgid "Edit..."
+msgstr "Επεξεργασία…"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:95
+msgid "Egypt"
+msgstr "Αίγυπτος"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:160
+msgid "El Salvador"
+msgstr "Ελ Σαλβαδόρ"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:227
+msgid "Emulated Display Refresh Rate:"
+msgstr "Συχνότητα ανανέωσης εξομοιωμένης οθόνης:"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:79
+msgid "Emulator Settings"
+msgstr "Ρυθμίσεις εξομοιωτή"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:52
+msgid "English"
+msgstr "Αγγλικά"
+
+#: src/xenia/app/emulator_window.cc:2076 src/xenia/app/emulator_window.cc:2220
+msgid "Enter gamertag for new profile:"
+msgstr "Εισαγάγετε gamertag για το νέο προφίλ:"
+
+#: src/xenia/ui/game_list_panel_wx.cc:754
+msgid "Enter new label:"
+msgstr "Εισαγάγετε νέα ετικέτα:"
+
+#: src/xenia/ui/game_config_dialog_wx.cc:435
+msgid "Error"
+msgstr "Σφάλμα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:94
+msgid "Estonia"
+msgstr "Εσθονία"
+
+#: src/xenia/app/emulator_window.cc:2421
+msgid ""
+"Experimental fork of Xenia Canary.\n"
+"\n"
+"https://github.com/has207/xenia-edge\n"
+"\n"
+"Branch: %s\n"
+"Commit: %s\n"
+"Build Date: %s\n"
+"\n"
+"UI font: Inter by Rasmus Andersson (https://rsms.me/inter/, SIL Open Font "
+"License 1.1).\n"
+"Icons by Icons8 (https://icons8.com)."
+msgstr ""
+"Πειραματικό fork του Xenia Canary.\n"
+"\n"
+"https://github.com/has207/xenia-edge\n"
+"\n"
+"Κλάδος: %s\n"
+"Commit: %s\n"
+"Ημερομηνία build: %s\n"
+"\n"
+"Γραμματοσειρά UI: Inter του Rasmus Andersson (https://rsms.me/inter/, SIL "
+"Open Font License 1.1).\n"
+"Εικονίδια από Icons8 (https://icons8.com)."
+
+#: src/xenia/app/emulator_window.cc:887
+msgid "FA&Q..."
+msgstr "FAQ(&Q)…"
+
+#: src/xenia/ui/patches_dialog_wx.cc:225
+msgid "Failed to save changes."
+msgstr "Αποτυχία αποθήκευσης αλλαγών."
+
+#: src/xenia/ui/game_config_dialog_wx.cc:434
+msgid "Failed to save: %s"
+msgstr "Αποτυχία αποθήκευσης: %s"
+
+#: src/xenia/ui/patches_dialog_wx.cc:214
+msgid "Failed to update patch state."
+msgstr "Αποτυχία ενημέρωσης κατάστασης patch."
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:181
+#: src/xenia/ui/profile_editor_dialog_wx.cc:185
+msgid "Family"
+msgstr "Family"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:98
+msgid "Faroe Islands"
+msgstr "Νήσοι Φερόες"
+
+#: src/xenia/app/emulator_window.cc:341
+msgid "Drum Kit"
+msgstr "Σετ Τυμπάνων"
+
+#: src/xenia/ui/game_list_panel_wx.cc:1236
+msgid "File Corrupted"
+msgstr "Αρχείο κατεστραμμένο"
+
+#: src/xenia/ui/game_list_panel_wx.cc:594
+msgid ""
+"File not found:\n"
+"%s"
+msgstr ""
+"Το αρχείο δεν βρέθηκε:\n"
+"%s"
+
+#: src/xenia/ui/game_config_dialog_wx.cc:193
+msgid "Filter cvars"
+msgstr "Φιλτράρισμα cvars"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:97
+msgid "Finland"
+msgstr "Φινλανδία"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:199
+msgid "Framerate Limit (0 = unlimited):"
+msgstr "Όριο framerate (0 = απεριόριστο):"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:99
+msgid "France"
+msgstr "Γαλλία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:55
+msgid "French"
+msgstr "Γαλλικά"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:281
+msgid "Full"
+msgstr "Πλήρης"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:237
+msgid "Full Screen:"
+msgstr "Πλήρης οθόνη:"
+
+#: src/xenia/app/emulator_window.cc:333
+msgid "Flight Stick"
+msgstr "Flight Stick"
+
+#: src/xenia/app/emulator_window.cc:891
+msgid "Game &compatibility..."
+msgstr "Συμβατότητα παιχνιδιών(&C)…"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:277
+msgid "GameMode not in PATH; install to enable."
+msgstr "Το GameMode δεν είναι στο PATH; εγκαταστήστε το για ενεργοποίηση."
+
+#: src/xenia/app/emulator_window.cc:345
+msgid "Gamepad"
+msgstr "Gamepad"
+
+#: src/xenia/ui/game_list_panel_wx.cc:96
+msgid "Gameplay"
+msgstr "Παίζεται"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:458
+msgid "Gamer Bio:"
+msgstr "Βιογραφικό παίκτη:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:451
+msgid "Gamer Motto:"
+msgstr "Σύνθημα παίκτη:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:445
+msgid "Gamer Name:"
+msgstr "Όνομα παίκτη:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:512
+msgid "Gamer Zone:"
+msgstr "Ζώνη παίκτη:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:276
+msgid "Gamercard Editor"
+msgstr "Επεξεργασία Gamercard"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:281
+msgid "Gamercard Editor - %s"
+msgstr "Επεξεργασία Gamercard — %s"
+
+#: src/xenia/ui/game_list_panel_wx.cc:305
+msgid "Gamerscore"
+msgstr "Gamerscore"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:434
+msgid "Gamertag:"
+msgstr "Gamertag:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:101
+msgid "Georgia"
+msgstr "Γεωργία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:54
+msgid "German"
+msgstr "Γερμανικά"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:89
+msgid "Germany"
+msgstr "Γερμανία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:180
+msgid "Gold"
+msgstr "Gold"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:157
+msgid "Graphics"
+msgstr "Γραφικά"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:163
+msgid "Graphics Backend:"
+msgstr "Σύστημα γραφικών:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:100
+msgid "Great Britain"
+msgstr "Μεγάλη Βρετανία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:102
+msgid "Greece"
+msgstr "Ελλάδα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:103
+msgid "Guatemala"
+msgstr "Γουατεμάλα"
+
+#: src/xenia/app/emulator_window.cc:1722
+msgid "Guide"
+msgstr "Οδηγός"
+
+#: src/xenia/app/emulator_window.cc:339
+msgid "Guitar"
+msgstr "Κιθάρα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:105
+msgid "Honduras"
+msgstr "Ονδούρα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:104
+msgid "Hong Kong"
+msgstr "Χονγκ Κονγκ"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:107
+msgid "Hungary"
+msgstr "Ουγγαρία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:114
+msgid "Iceland"
+msgstr "Ισλανδία"
+
+#: src/xenia/ui/game_list_panel_wx.cc:302
+msgid "Icon"
+msgstr "Εικονίδιο"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:396
+msgid "Icon change is disabled while a title is running."
+msgstr "Η αλλαγή εικονιδίου είναι απενεργοποιημένη ενώ εκτελείται ένας τίτλος."
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:198
+msgid "Import"
+msgstr "Εισαγωγή"
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:431
+msgid "Import %zu New Items"
+msgstr "Εισαγωγή %zu νέων στοιχείων"
+
+#: src/xenia/app/emulator_window.cc:1553
+msgid "Import failed"
+msgstr "Η εισαγωγή απέτυχε"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:305
+msgid "In-Process Title Relaunch:"
+msgstr "Επανεκκίνηση τίτλου εντός διεργασίας:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:111
+msgid "India"
+msgstr "Ινδία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:108
+msgid "Indonesia"
+msgstr "Ινδονησία"
+
+#: src/xenia/ui/install_progress_dialog_wx.cc:173
+msgid "Installation Path: "
+msgstr "Διαδρομή εγκατάστασης: "
+
+#: src/xenia/ui/install_progress_dialog_wx.cc:45
+msgid "Installation Progress"
+msgstr "Πρόοδος εγκατάστασης"
+
+#: src/xenia/ui/game_list_panel_wx.cc:761
+msgid "Invalid Label"
+msgstr "Μη έγκυρη ετικέτα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:594
+#: src/xenia/ui/profile_editor_dialog_wx.cc:602
+msgid "Invalid file"
+msgstr "Μη έγκυρο αρχείο"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:580
+msgid "Invalid gamertag"
+msgstr "Μη έγκυρο gamertag"
+
+#: src/xenia/app/emulator_window.cc:2089 src/xenia/app/emulator_window.cc:2233
+msgid "Invalid gamertag."
+msgstr "Μη έγκυρο gamertag."
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:611
+msgid "Invalid resolution"
+msgstr "Μη έγκυρη ανάλυση"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:113
+msgid "Iran"
+msgstr "Ιράν"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:112
+msgid "Iraq"
+msgstr "Ιράκ"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:109
+msgid "Ireland"
+msgstr "Ιρλανδία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:110
+msgid "Israel"
+msgstr "Ισραήλ"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:57
+msgid "Italian"
+msgstr "Ιταλικά"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:115
+msgid "Italy"
+msgstr "Ιταλία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:116
+msgid "Jamaica"
+msgstr "Τζαμάικα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:118
+msgid "Japan"
+msgstr "Ιαπωνία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:53
+msgid "Japanese"
+msgstr "Ιαπωνικά"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:117
+msgid "Jordan"
+msgstr "Ιορδανία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:123
+msgid "Kazakhstan"
+msgstr "Καζακστάν"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:119
+msgid "Kenya"
+msgstr "Κένυα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:121
+msgid "Korea"
+msgstr "Κορέα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:58
+msgid "Korean"
+msgstr "Κορεατικά"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:122
+msgid "Kuwait"
+msgstr "Κουβέιτ"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:120
+msgid "Kyrgyzstan"
+msgstr "Κιργιστάν"
+
+#: src/xenia/ui/game_list_panel_wx.cc:691
+#: src/xenia/ui/game_list_panel_wx.cc:695
+msgid "Label"
+msgstr "Ετικέτα"
+
+#: src/xenia/ui/game_list_panel_wx.cc:761
+msgid "Label cannot contain '::'."
+msgstr "Η ετικέτα δεν μπορεί να περιέχει '::'."
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:464
+#: src/xenia/ui/quick_settings_dialog_wx.cc:311
+msgid "Language:"
+msgstr "Γλώσσα:"
+
+#: src/xenia/ui/game_list_panel_wx.cc:306
+msgid "Last Played"
+msgstr "Τελευταία εκτέλεση"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:128
+msgid "Latvia"
+msgstr "Λετονία"
+
+#: src/xenia/ui/game_list_panel_wx.cc:936
+#: src/xenia/ui/game_list_panel_wx.cc:943
+msgid "Launch"
+msgstr "Εκκίνηση"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:124
+msgid "Lebanon"
+msgstr "Λίβανος"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:242
+msgid "Letterbox:"
+msgstr "Letterbox:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:129
+msgid "Libya"
+msgstr "Λιβύη"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:292
+msgid "License:"
+msgstr "Άδεια:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:125
+msgid "Liechtenstein"
+msgstr "Λιχτενστάιν"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:253
+msgid "Linux"
+msgstr "Linux"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:126
+msgid "Lithuania"
+msgstr "Λιθουανία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:479
+msgid "Live Enabled"
+msgstr "Live ενεργοποιημένο"
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:182
+msgid "Loading titles..."
+msgstr "Φόρτωση τίτλων…"
+
+#: src/xenia/ui/game_list_panel_wx.cc:98
+msgid "Loads"
+msgstr "Φορτώνει"
+
+#: src/xenia/app/emulator_window.cc:2003
+msgid "Login"
+msgstr "Σύνδεση"
+
+#: src/xenia/app/emulator_window.cc:2031
+msgid "Logout"
+msgstr "Αποσύνδεση"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:127
+msgid "Luxembourg"
+msgstr "Λουξεμβούργο"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:134
+msgid "Macau"
+msgstr "Μακάο"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:132
+msgid "Macedonia"
+msgstr "Βόρεια Μακεδονία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:137
+msgid "Malaysia"
+msgstr "Μαλαισία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:135
+msgid "Maldives"
+msgstr "Μαλδίβες"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:181
+msgid ""
+"Manage emulator configuration. Changes are saved to config.toml; some "
+"settings need a relaunch to take effect."
+msgstr ""
+"Διαχειριστείτε τη διαμόρφωση του εξομοιωτή. Οι αλλαγές αποθηκεύονται στο "
+"config.toml; κάποιες ρυθμίσεις απαιτούν επανεκκίνηση για να εφαρμοστούν."
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:273
+msgid "MangoHUD not in PATH; install to enable."
+msgstr "Το MangoHUD δεν είναι στο PATH; εγκαταστήστε το για ενεργοποίηση."
+
+#: src/xenia/ui/game_list_panel_wx.cc:1044
+msgid "Master"
+msgstr "Master"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:136
+msgid "Mexico"
+msgstr "Μεξικό"
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:98
+msgid "Module: %s"
+msgstr "Άρθρωμα: %s"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:131
+msgid "Monaco"
+msgstr "Μονακό"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:133
+msgid "Mongolia"
+msgstr "Μογγολία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:130
+msgid "Morocco"
+msgstr "Μαρόκο"
+
+#: src/xenia/app/emulator_window.cc:1146
+#: src/xenia/app/emulator_window.cc:2823
+msgid "Mute"
+msgstr "Σίγαση"
+
+#: src/xenia/ui/install_progress_dialog_wx.cc:172
+msgid "Name: %s"
+msgstr "Όνομα: %s"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:175
+msgid "Native"
+msgstr "Εγγενής"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:139
+msgid "Netherlands"
+msgstr "Ολλανδία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:141
+msgid "New Zealand"
+msgstr "Νέα Ζηλανδία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:138
+msgid "Nicaragua"
+msgstr "Νικαράγουα"
+
+#: src/xenia/app/emulator_window.cc:2211
+msgid "No Profiles Found"
+msgstr "Δεν βρέθηκαν προφίλ"
+
+#: src/xenia/ui/game_list_panel_wx.cc:593
+msgid "No file path is set for this title."
+msgstr "Δεν έχει οριστεί διαδρομή αρχείου για αυτόν τον τίτλο."
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:376
+msgid "No games found."
+msgstr "Δεν βρέθηκαν παιχνίδια."
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:376
+msgid "No new games found."
+msgstr "Δεν βρέθηκαν νέα παιχνίδια."
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:178
+#: src/xenia/ui/profile_editor_dialog_wx.cc:184
+#: src/xenia/ui/quick_settings_dialog_wx.cc:279
+msgid "None"
+msgstr "Κανένα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:140
+msgid "Norway"
+msgstr "Νορβηγία"
+
+#: src/xenia/ui/game_list_panel_wx.cc:278
+msgid ""
+"Not\n"
+"played"
+msgstr ""
+"Δεν\n"
+"παίχτηκε"
+
+#: src/xenia/app/emulator_window.cc:977 src/xenia/app/emulator_window.cc:2182
+msgid "Not logged in"
+msgstr "Μη συνδεδεμένος"
+
+#: src/xenia/app/emulator_window.cc:2215 src/xenia/app/emulator_window.cc:2258
+msgid "Not now"
+msgstr "Όχι τώρα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:142
+msgid "Oman"
+msgstr "Ομάν"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:500
+msgid "Online Domain:"
+msgstr "Διαδικτυακός τομέας:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:476
+msgid "Online Profile Settings"
+msgstr "Διαδικτυακές ρυθμίσεις προφίλ"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:495
+msgid "Online XUID:"
+msgstr "Διαδικτυακό XUID:"
+
+#: src/xenia/app/emulator_window.cc:950
+msgid "Open"
+msgstr "Άνοιγμα"
+
+#: src/xenia/app/emulator_window.cc:951 src/xenia/app/emulator_window.cc:1716
+msgid "Open a title"
+msgstr "Άνοιγμα τίτλου"
+
+#: src/xenia/ui/game_list_panel_wx.cc:949
+msgid "Open containing folder"
+msgstr "Άνοιγμα φακέλου που περιέχει το αρχείο"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:285
+msgid "Open using Rosetta"
+msgstr "Άνοιγμα με Rosetta"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:273
+msgid "Other"
+msgstr "Άλλα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:586
+msgid "PNG Images (*.png)|*.png|All Files (*.*)|*.*"
+msgstr "Εικόνες PNG (*.png)|*.png|Όλα τα αρχεία (*.*)|*.*"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:402
+msgid "PNG, 64x64 or 32x32. Refresh after re-login."
+msgstr "PNG, 64x64 ή 32x32. Ανανέωση μετά από νέα σύνδεση."
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:146
+msgid "Pakistan"
+msgstr "Πακιστάν"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:143
+msgid "Panama"
+msgstr "Παναμάς"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:150
+msgid "Paraguay"
+msgstr "Παραγουάη"
+
+#: src/xenia/ui/patches_dialog_wx.cc:112
+msgid "Patch #%zu"
+msgstr "Patch #%zu"
+
+#: src/xenia/ui/game_list_panel_wx.cc:1000
+#: src/xenia/ui/game_list_panel_wx.cc:1025
+msgid "Patches"
+msgstr "Patches"
+
+#: src/xenia/ui/game_list_panel_wx.cc:692
+#: src/xenia/ui/game_list_panel_wx.cc:697
+msgid "Path"
+msgstr "Διαδρομή"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:144
+msgid "Peru"
+msgstr "Περού"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:145
+msgid "Philippines"
+msgstr "Φιλιππίνες"
+
+#: src/xenia/ui/game_list_panel_wx.cc:94
+msgid "Playable"
+msgstr "Παίξιμο"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:147
+msgid "Poland"
+msgstr "Πολωνία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:62
+msgid "Polish"
+msgstr "Πολωνικά"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:149
+msgid "Portugal"
+msgstr "Πορτογαλία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:60
+msgid "Portuguese"
+msgstr "Πορτογαλικά"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:184
+msgid "Pro"
+msgstr "Pro"
+
+#: src/xenia/app/emulator_window.cc:980 src/xenia/app/emulator_window.cc:981
+msgid "Profile"
+msgstr "Προφίλ"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:380
+msgid "Profile Settings"
+msgstr "Ρυθμίσεις προφίλ"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:608
+msgid "Profile icon must be 64x64 or 32x32. Selected image is %dx%d."
+msgstr ""
+"Το εικονίδιο προφίλ πρέπει να είναι 64x64 ή 32x32. Η επιλεγμένη εικόνα είναι "
+"%dx%d."
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:399
+msgid "Profile must be signed in to change the icon."
+msgstr "Το προφίλ πρέπει να είναι συνδεδεμένο για αλλαγή εικονιδίου."
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:94
+msgid "Publisher: %s"
+msgstr "Εκδότης: %s"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:148
+msgid "Puerto Rico"
+msgstr "Πουέρτο Ρίκο"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:151
+msgid "Qatar"
+msgstr "Κατάρ"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:184
+msgid "Recreation"
+msgstr "Recreation"
+
+#: src/xenia/ui/game_list_panel_wx.cc:729
+msgid "Remove"
+msgstr "Αφαίρεση"
+
+#: src/xenia/ui/game_list_panel_wx.cc:1075
+msgid ""
+"Remove %s from the list?\n"
+"\n"
+"This only removes it from the list in Xenia; game files on disk are kept."
+msgstr ""
+"Αφαίρεση του %s από τη λίστα?\n"
+"\n"
+"Αυτό το αφαιρεί μόνο από τη λίστα στο Xenia· τα ίδια τα αρχεία του παιχνιδιού διατηρούνται."
+
+#: src/xenia/ui/game_list_panel_wx.cc:790
+msgid "Remove '%s' from the disc list?"
+msgstr "Αφαίρεση του '%s' από τη λίστα δίσκων?"
+
+#: src/xenia/ui/game_list_panel_wx.cc:791
+msgid "Remove Disc"
+msgstr "Αφαίρεση δίσκου"
+
+#: src/xenia/ui/game_list_panel_wx.cc:1066
+#: src/xenia/ui/game_list_panel_wx.cc:1078
+msgid "Remove from list"
+msgstr "Αφαίρεση από τη λίστα"
+
+#: src/xenia/ui/game_config_dialog_wx.cc:346
+msgid "Remove this override"
+msgstr "Αφαίρεση αυτής της παράκαμψης"
+
+#: src/xenia/ui/game_list_panel_wx.cc:754
+msgid "Rename Label"
+msgstr "Μετονομασία ετικέτας"
+
+#: src/xenia/ui/game_list_panel_wx.cc:728
+msgid "Rename Label..."
+msgstr "Μετονομασία ετικέτας…"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:169
+msgid "Rendering:"
+msgstr "Απόδοση:"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:481
+#: src/xenia/ui/quick_settings_dialog_wx.cc:584
+msgid "Reset all settings to their default values?"
+msgstr "Επαναφορά όλων των ρυθμίσεων στις προεπιλεγμένες τιμές?"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:329
+msgid "Reset to Default"
+msgstr "Επαναφορά στις προεπιλογές"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:224
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:482
+#: src/xenia/ui/quick_settings_dialog_wx.cc:585
+msgid "Reset to Defaults"
+msgstr "Επαναφορά στις προεπιλογές"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:185
+msgid "Resolution Scale:"
+msgstr "Κλίμακα ανάλυσης:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:152
+msgid "Romania"
+msgstr "Ρουμανία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:63
+msgid "Russian"
+msgstr "Ρωσικά"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:153
+msgid "Russian Federation"
+msgstr "Ρωσική Ομοσπονδία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:154
+msgid "Saudi Arabia"
+msgstr "Σαουδική Αραβία"
+
+#: src/xenia/ui/game_config_dialog_wx.cc:312
+#: src/xenia/ui/profile_editor_dialog_wx.cc:534
+#: src/xenia/ui/quick_settings_dialog_wx.cc:331
+msgid "Save"
+msgstr "Αποθήκευση"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:213
+msgid "Save Changes"
+msgstr "Αποθήκευση αλλαγών"
+
+#: src/xenia/ui/patches_dialog_wx.cc:236
+msgid "Saved. Takes effect on next launch."
+msgstr "Αποθηκεύτηκε. Εφαρμόζεται στην επόμενη εκκίνηση."
+
+#: src/xenia/ui/game_list_panel_wx.cc:981
+msgid "Saves"
+msgstr "Αποθηκεύσεις"
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:120
+msgid "Scan for Games"
+msgstr "Σάρωση για παιχνίδια"
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:45
+msgid "Scanning: %s"
+msgstr "Σάρωση: %s"
+
+#: src/xenia/ui/game_list_panel_wx.cc:457
+msgid "Search %zu games..."
+msgstr "Αναζήτηση σε %zu παιχνίδια…"
+
+#: src/xenia/ui/game_list_panel_wx.cc:248
+#: src/xenia/ui/game_list_panel_wx.cc:453
+msgid "Search games..."
+msgstr "Αναζήτηση παιχνιδιών…"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:313
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:323
+#: src/xenia/ui/game_config_dialog_wx.cc:110
+msgid "Select %s"
+msgstr "Επιλογή %s"
+
+#: src/xenia/ui/game_list_panel_wx.cc:603
+msgid "Select Content Package"
+msgstr "Επιλογή πακέτου περιεχομένου"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:585
+msgid "Select PNG image"
+msgstr "Επιλογή εικόνας PNG"
+
+#: src/xenia/ui/advanced_settings_dialog_wx.cc:332
+#: src/xenia/ui/game_config_dialog_wx.cc:117
+msgid "Select directory for %s"
+msgstr "Επιλογή καταλόγου για %s"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:593
+msgid "Selected file is not a valid PNG image."
+msgstr "Το επιλεγμένο αρχείο δεν είναι έγκυρη εικόνα PNG."
+
+#: src/xenia/app/emulator_window.cc:955 src/xenia/app/emulator_window.cc:956
+#: src/xenia/app/emulator_window.cc:1722
+msgid "Settings"
+msgstr "Ρυθμίσεις"
+
+#: src/xenia/app/emulator_window.cc:856
+msgid "Show &Toolbar"
+msgstr "Εμφάνιση γραμμής εργαλείων(&T)"
+
+#: src/xenia/app/emulator_window.cc:805
+msgid "Show content directory..."
+msgstr "Εμφάνιση καταλόγου περιεχομένου…"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:179
+msgid "Silver"
+msgstr "Silver"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:61
+msgid "Simplified Chinese"
+msgstr "Απλοποιημένα Κινεζικά"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:156
+msgid "Singapore"
+msgstr "Σιγκαπούρη"
+
+#: src/xenia/app/emulator_window.cc:2007
+msgid "Slot %d"
+msgstr "Θέση %d"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:158
+msgid "Slovak Republic"
+msgstr "Σλοβακία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:157
+msgid "Slovenia"
+msgstr "Σλοβενία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:174
+msgid "South Africa"
+msgstr "Νότια Αφρική"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:96
+msgid "Spain"
+msgstr "Ισπανία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:56
+msgid "Spanish"
+msgstr "Ισπανικά"
+
+#: src/xenia/ui/game_list_panel_wx.cc:301
+msgid "Status"
+msgstr "Κατάσταση"
+
+#: src/xenia/ui/install_progress_dialog_wx.cc:181
+msgid "Status: %s"
+msgstr "Κατάσταση: %s"
+
+#: src/xenia/app/emulator_window.cc:1713
+msgid "Stop the running title and return to the list"
+msgstr "Διακοπή του τίτλου που εκτελείται και επιστροφή στη λίστα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:520
+msgid "Subscription Tier:"
+msgstr "Επίπεδο συνδρομής:"
+
+#: src/xenia/ui/install_progress_dialog_wx.cc:219
+msgid "Successfully installed %d package(s)."
+msgstr "Εγκαταστάθηκαν επιτυχώς %d πακέτα."
+
+#: src/xenia/ui/game_list_panel_wx.cc:608
+msgid ""
+"Supported Files|*;*.iso;*.xex;*.zar|Disc Image (*.iso)|*.iso|Disc Archive (*."
+"zar)|*.zar|Xbox Executable (*.xex)|*.xex|All Files (*.*)|*.*"
+msgstr ""
+"Υποστηριζόμενα αρχεία|*;*.iso;*.xex;*.zar|Εικόνα δίσκου (*.iso)|*.iso|"
+"Αρχειοθήκη δίσκου (*.zar)|*.zar|Εκτελέσιμο Xbox (*.xex)|*.xex|Όλα τα αρχεία "
+"(*.*)|*.*"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:155
+msgid "Sweden"
+msgstr "Σουηδία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:83
+msgid "Switzerland"
+msgstr "Ελβετία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:161
+msgid "Syria"
+msgstr "Συρία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:166
+msgid "Taiwan"
+msgstr "Ταϊβάν"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:162
+msgid "Thailand"
+msgstr "Ταϊλάνδη"
+
+#: src/xenia/app/emulator_window.cc:2209
+msgid ""
+"There is no profile available. You will not be able to save without one.\n"
+"\n"
+"Would you like to create one now?"
+msgstr ""
+"Δεν υπάρχει διαθέσιμο προφίλ. Δεν θα μπορείτε να αποθηκεύσετε χωρίς ένα.\n"
+"\n"
+"Θέλετε να δημιουργήσετε ένα τώρα;"
+
+#: src/xenia/ui/game_list_panel_wx.cc:303
+msgid "Title"
+msgstr "Τίτλος"
+
+#: src/xenia/ui/game_list_panel_wx.cc:985
+msgid "Title Updates"
+msgstr "Ενημερώσεις τίτλου"
+
+#: src/xenia/ui/game_list_panel_wx.cc:597
+msgid "Title not found"
+msgstr "Ο τίτλος δεν βρέθηκε"
+
+#: src/xenia/ui/patches_dialog_wx.cc:155
+msgid "Toggles take effect on next launch."
+msgstr "Οι εναλλαγές εφαρμόζονται στην επόμενη εκκίνηση."
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:59
+msgid "Traditional Chinese"
+msgstr "Παραδοσιακά Κινεζικά"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:165
+msgid "Trinidad And Tobago"
+msgstr "Τρινιντάντ και Τομπάγκο"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:163
+msgid "Tunisia"
+msgstr "Τυνησία"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:164
+msgid "Turkey"
+msgstr "Τουρκία"
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:89
+msgid "Type: %s"
+msgstr "Τύπος: %s"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:167
+msgid "Ukraine"
+msgstr "Ουκρανία"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:207
+msgid "Uncapped"
+msgstr "Χωρίς όριο"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:185
+msgid "Underground"
+msgstr "Underground"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:66
+msgid "United Arab Emirates"
+msgstr "Ηνωμένα Αραβικά Εμιράτα"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:168
+msgid "United States"
+msgstr "Ηνωμένες Πολιτείες"
+
+#: src/xenia/ui/game_list_panel_wx.cc:103
+msgid "Unknown"
+msgstr "Άγνωστο"
+
+#: src/xenia/app/emulator_window.cc:2822
+msgid "Unmute"
+msgstr "Κατάργηση σίγασης"
+
+#: src/xenia/ui/game_list_panel_wx.cc:100
+msgid "Unplayable"
+msgstr "Δεν παίζεται"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:341
+#: src/xenia/ui/quick_settings_dialog_wx.cc:619
+msgid "Unsaved Changes"
+msgstr "Μη αποθηκευμένες αλλαγές"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:169
+msgid "Uruguay"
+msgstr "Ουρουγουάη"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:264
+msgid "Use GameMode"
+msgstr "Χρήση GameMode"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:280
+msgid "Use MTL HUD"
+msgstr "Χρήση MTL HUD"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:259
+msgid "Use MangoHud"
+msgstr "Χρήση MangoHud"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:170
+msgid "Uzbekistan"
+msgstr "Ουζμπεκιστάν"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:232
+msgid "VSync:"
+msgstr "VSync:"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:171
+msgid "Venezuela"
+msgstr "Βενεζουέλα"
+
+#: src/xenia/ui/game_scan_progress_dialog_wx.cc:102
+msgid "Version: %s"
+msgstr "Έκδοση: %s"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:172
+msgid "Viet Nam"
+msgstr "Βιετνάμ"
+
+#: src/xenia/app/emulator_window.cc:969 src/xenia/app/emulator_window.cc:970
+msgid "Volume"
+msgstr "Ένταση"
+
+#: src/xenia/app/emulator_window.cc:2255
+msgid ""
+"Would you like to add games now?\n"
+"\n"
+"You can also do this later from File -> Add games."
+msgstr ""
+"Θέλετε να προσθέσετε παιχνίδια τώρα;\n"
+"\n"
+"Μπορείτε επίσης να το κάνετε αργότερα από Αρχείο -> Προσθήκη παιχνιδιών."
+
+#: src/xenia/app/emulator_window.cc:1551
+msgid ""
+"Xenia is not fully initialized yet. Try again after the app finishes "
+"starting up."
+msgstr ""
+"Το Xenia δεν έχει αρχικοποιηθεί πλήρως ακόμη. Δοκιμάστε ξανά αφού "
+"ολοκληρωθεί η εκκίνηση της εφαρμογής."
+
+#: src/xenia/app/emulator_window.cc:329
+msgid "Wheel"
+msgstr "Τιμόνι"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:173
+msgid "Yemen"
+msgstr "Υεμένη"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:340
+msgid "You have unsaved changes. Discard them?"
+msgstr "Έχετε μη αποθηκευμένες αλλαγές. Απόρριψη?"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:617
+msgid "You have unsaved changes. Save them before opening advanced settings?"
+msgstr ""
+"Έχετε μη αποθηκευμένες αλλαγές. Αποθήκευση πριν το άνοιγμα των σύνθετων "
+"ρυθμίσεων?"
+
+#: src/xenia/ui/profile_editor_dialog_wx.cc:175
+msgid "Zimbabwe"
+msgstr "Ζιμπάμπουε"
+
+#: src/xenia/ui/patches_dialog_wx.cc:137
+msgid "by %s"
+msgstr "από %s"
+
+#: src/xenia/ui/quick_settings_dialog_wx.cc:274
+msgid "macOS"
+msgstr "macOS"
+
+#: src/xenia/ui/game_list_panel_wx.cc:1072
+msgid "title %08X"
+msgstr "τίτλος %08X"
+
+
+#: src/xenia/ui/redist_installer_wx.cc:396
+msgid "dxcompiler.dll and dxil.dll not found, required for Direct3D 12 shaders. Download now (~26 MB)?"
+msgstr "Δεν βρέθηκαν τα dxcompiler.dll και dxil.dll, απαιτούνται για τους shaders του Direct3D 12. Λήψη τώρα (~26 MB);"
+
+#: src/xenia/ui/redist_installer_wx.cc:438
+msgid "D3D12Core.dll not found, required for Shader Model 6.6. Download now (~35 MB) and restart?"
+msgstr "Δεν βρέθηκε το D3D12Core.dll, απαιτείται για το Shader Model 6.6. Λήψη τώρα (~35 MB) και επανεκκίνηση;"
+
+#: src/xenia/ui/redist_installer_wx.cc:485
+msgid "D3D12SDKLayers.dll not found, required for the Direct3D 12 debug layer. Download now (~35 MB) and restart?"
+msgstr "Δεν βρέθηκε το D3D12SDKLayers.dll, απαιτείται για το επίπεδο εντοπισμού σφαλμάτων Direct3D 12. Λήψη τώρα (~35 MB) και επανεκκίνηση;"
+
+#: src/xenia/ui/redist_installer_wx.cc:358
+msgid "Download failed. Check your internet connection and try again."
+msgstr "Η λήψη απέτυχε. Ελέγξτε τη σύνδεσή σας στο διαδίκτυο και δοκιμάστε ξανά."
+
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "Ο χρόνος εκτέλεσης Microsoft Visual C++ (%u.%u ή νεότερος) δεν είναι εγκατεστημένος. Λήψη από τη Microsoft τώρα (~25 MB) και εγκατάσταση;"
+
+#: src/xenia/ui/redist_installer_wx.cc:364
+msgid "The downloaded file failed integrity verification and was discarded."
+msgstr "Το αρχείο που λήφθηκε απέτυχε στον έλεγχο ακεραιότητας και απορρίφθηκε."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "Ο εγκατεστημένος χρόνος εκτέλεσης Microsoft Visual C++ %u.%u.%u είναι παλαιότερος από τον %u.%u που απαιτεί αυτή η έκδοση του Xenia. Λήψη του νεότερου από τη Microsoft τώρα (~25 MB) και εγκατάσταση;"
+
+#: src/xenia/ui/redist_installer_wx.cc:369
+msgid "Failed to install the downloaded files."
+msgstr "Δεν ήταν δυνατή η εγκατάσταση των ληφθέντων αρχείων."
+
+#: src/xenia/ui/redist_installer_wx.cc:456
+msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Εγκαταστάθηκε ο χρόνος εκτέλεσης DirectX 12 Agility SDK, αλλά η αυτόματη επανεκκίνηση απέτυχε. Επανεκκινήστε το Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Εγκαταστάθηκε ο χρόνος εκτέλεσης Microsoft Visual C++, αλλά η αυτόματη επανεκκίνηση απέτυχε. Επανεκκινήστε το Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:503
+msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
+msgstr "Εγκαταστάθηκε το επίπεδο εντοπισμού σφαλμάτων Direct3D 12, αλλά η αυτόματη επανεκκίνηση απέτυχε. Επανεκκινήστε το Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:746
+msgid "vulkan-1.dll not found, required for the Vulkan graphics backend. Download now (~20 MB)?"
+msgstr "Δεν βρέθηκε το vulkan-1.dll, απαιτείται για το backend γραφικών Vulkan. Λήψη τώρα (~20 MB);"
+
