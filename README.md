@@ -26,3 +26,5 @@ No copyrighted files, ROMs, ISOs, game titles, or proprietary system keys are in
 
 Users are legally required to dump and use only their own legally acquired game backups and files from hardware they physically own.
 <img width="2048" height="922" alt="image" src="https://github.com/user-attachments/assets/50309880-9595-4547-abc8-0027263937cc" />
+## Credits
+* Original XenDroid project by **[rfandango](https://github.com/rfandango)**.
