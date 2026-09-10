@@ -1,0 +1,4497 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include "xenia/gpu/spirv_shader_translator.h"
+
+#include <cstdint>
+
+#include "third_party/glslang/SPIRV/GLSL.std.450.h"
+#include "xenia/base/assert.h"
+#include "xenia/base/math.h"
+#include "xenia/gpu/draw_util.h"
+#include "xenia/gpu/render_target_cache.h"
+#include "xenia/gpu/spirv_compatibility.h"
+
+namespace xe {
+namespace gpu {
+
+spv::Id SpirvShaderTranslator::PreClampedFloat32To7e3(
+    SpirvBuilder& builder, spv::Id f32_scalar, spv::Id ext_inst_glsl_std_450) {
+  // https://github.com/Microsoft/DirectXTex/blob/master/DirectXTex/DirectXTexConvert.cpp
+  // Assuming the value is already clamped to [0, 31.875].
+
+  spv::Id type_uint = builder.makeUintType(32);
+
+  // Need the source as uint for bit operations.
+  {
+    spv::Id source_type = builder.getTypeId(f32_scalar);
+    assert_true(builder.isScalarType(source_type));
+    if (!builder.isUintType(source_type)) {
+      f32_scalar = builder.createUnaryOp(spv::OpBitcast, type_uint, f32_scalar);
+    }
+  }
+
+  // The denormal 7e3 case.
+  // denormal_biased_f32 = (f32 & 0x7FFFFF) | 0x800000
+  spv::Id denormal_biased_f32;
+  {
+    spv::Instruction* denormal_insert_instruction = new spv::Instruction(
+        builder.getUniqueId(), type_uint, spv::OpBitFieldInsert);
+    denormal_insert_instruction->addIdOperand(f32_scalar);
+    denormal_insert_instruction->addIdOperand(builder.makeUintConstant(1));
+    denormal_insert_instruction->addIdOperand(builder.makeUintConstant(23));
+    denormal_insert_instruction->addIdOperand(builder.makeUintConstant(9));
+    builder.getBuildPoint()->addInstruction(
+        std::unique_ptr<spv::Instruction>(denormal_insert_instruction));
+    denormal_biased_f32 = denormal_insert_instruction->getResultId();
+  }
+  // denormal_biased_f32_shift_amount = min(125 - (f32 >> 23), 24)
+  // Not allowing the shift to overflow as that's undefined in SPIR-V.
+  spv::Id denormal_biased_f32_shift_amount;
+  {
+    spv::Instruction* denormal_shift_amount_instruction =
+        new spv::Instruction(builder.getUniqueId(), type_uint, spv::OpExtInst);
+    denormal_shift_amount_instruction->addIdOperand(ext_inst_glsl_std_450);
+    denormal_shift_amount_instruction->addImmediateOperand(GLSLstd450UMin);
+    denormal_shift_amount_instruction->addIdOperand(builder.createBinOp(
+        spv::OpISub, type_uint, builder.makeUintConstant(125),
+        builder.createBinOp(spv::OpShiftRightLogical, type_uint, f32_scalar,
+                            builder.makeUintConstant(23))));
+    denormal_shift_amount_instruction->addIdOperand(
+        builder.makeUintConstant(24));
+    builder.getBuildPoint()->addInstruction(
+        std::unique_ptr<spv::Instruction>(denormal_shift_amount_instruction));
+    denormal_biased_f32_shift_amount =
+        denormal_shift_amount_instruction->getResultId();
+  }
+  // denormal_biased_f32 =
+  //     ((f32 & 0x7FFFFF) | 0x800000) >> min(125 - (f32 >> 23), 24)
+  denormal_biased_f32 = builder.createBinOp(spv::OpShiftRightLogical, type_uint,
+                                            denormal_biased_f32,
+                                            denormal_biased_f32_shift_amount);
+
+  // The normal 7e3 case.
+  // Bias the exponent.
+  // normal_biased_f32 = f32 - (124 << 23)
+  spv::Id normal_biased_f32 =
+      builder.createBinOp(spv::OpISub, type_uint, f32_scalar,
+                          builder.makeUintConstant(UINT32_C(124) << 23));
+
+  // Select the needed conversion depending on whether the number is too small
+  // to be represented as normalized 7e3.
+  spv::Id biased_f32 = builder.createTriOp(
+      spv::OpSelect, type_uint,
+      builder.createBinOp(spv::OpULessThan, builder.makeBoolType(), f32_scalar,
+                          builder.makeUintConstant(0x3E800000)),
+      denormal_biased_f32, normal_biased_f32);
+
+  // Build the 7e3 number rounding to the nearest even.
+  // ((biased_f32 + 0x7FFF + ((biased_f32 >> 16) & 1)) >> 16) & 0x3FF
+  return builder.createTriOp(
+      spv::OpBitFieldUExtract, type_uint,
+      builder.createBinOp(
+          spv::OpIAdd, type_uint,
+          builder.createBinOp(spv::OpIAdd, type_uint, biased_f32,
+                              builder.makeUintConstant(0x7FFF)),
+          builder.createTriOp(spv::OpBitFieldUExtract, type_uint, biased_f32,
+                              builder.makeUintConstant(16),
+                              builder.makeUintConstant(1))),
+      builder.makeUintConstant(16), builder.makeUintConstant(10));
+}
+
+spv::Id SpirvShaderTranslator::UnclampedFloat32To7e3(
+    SpirvBuilder& builder, spv::Id f32_scalar, spv::Id ext_inst_glsl_std_450) {
+  spv::Id type_float = builder.makeFloatType(32);
+
+  // Need the source as float for clamping.
+  {
+    spv::Id source_type = builder.getTypeId(f32_scalar);
+    assert_true(builder.isScalarType(source_type));
+    if (!builder.isFloatType(source_type)) {
+      f32_scalar =
+          builder.createUnaryOp(spv::OpBitcast, type_float, f32_scalar);
+    }
+  }
+
+  {
+    spv::Instruction* clamp_instruction =
+        new spv::Instruction(builder.getUniqueId(), type_float, spv::OpExtInst);
+    clamp_instruction->addIdOperand(ext_inst_glsl_std_450);
+    clamp_instruction->addImmediateOperand(GLSLstd450NClamp);
+    clamp_instruction->addIdOperand(f32_scalar);
+    clamp_instruction->addIdOperand(builder.makeFloatConstant(0.0f));
+    clamp_instruction->addIdOperand(builder.makeFloatConstant(31.875f));
+    builder.getBuildPoint()->addInstruction(
+        std::unique_ptr<spv::Instruction>(clamp_instruction));
+    f32_scalar = clamp_instruction->getResultId();
+  }
+
+  return PreClampedFloat32To7e3(builder, f32_scalar, ext_inst_glsl_std_450);
+}
+
+spv::Id SpirvShaderTranslator::Float7e3To32(SpirvBuilder& builder,
+                                            spv::Id f10_uint_scalar,
+                                            uint32_t f10_shift,
+                                            bool result_as_uint,
+                                            spv::Id ext_inst_glsl_std_450) {
+  // https://github.com/Microsoft/DirectXTex/blob/master/DirectXTex/DirectXTexConvert.cpp
+
+  assert_true(builder.isUintType(builder.getTypeId(f10_uint_scalar)));
+  assert_true(f10_shift <= (32 - 10));
+
+  spv::Id type_bool = builder.makeBoolType();
+  spv::Id type_int = builder.makeIntType(32);
+  spv::Id type_uint = builder.makeUintType(32);
+
+  spv::Id f10_unbiased_exponent = builder.createTriOp(
+      spv::OpBitFieldUExtract, type_uint, f10_uint_scalar,
+      builder.makeUintConstant(f10_shift + 7), builder.makeUintConstant(3));
+  spv::Id f10_mantissa = builder.createTriOp(
+      spv::OpBitFieldUExtract, type_uint, f10_uint_scalar,
+      builder.makeUintConstant(f10_shift), builder.makeUintConstant(7));
+
+  // The denormal nonzero 7e3 case.
+  // denormal_mantissa_msb = findMSB(f10_mantissa)
+  spv::Id denormal_mantissa_msb;
+  {
+    spv::Instruction* denormal_mantissa_msb_instruction =
+        new spv::Instruction(builder.getUniqueId(), type_int, spv::OpExtInst);
+    denormal_mantissa_msb_instruction->addIdOperand(ext_inst_glsl_std_450);
+    denormal_mantissa_msb_instruction->addImmediateOperand(GLSLstd450FindUMsb);
+    denormal_mantissa_msb_instruction->addIdOperand(f10_mantissa);
+    builder.getBuildPoint()->addInstruction(
+        std::unique_ptr<spv::Instruction>(denormal_mantissa_msb_instruction));
+    denormal_mantissa_msb = denormal_mantissa_msb_instruction->getResultId();
+  }
+  denormal_mantissa_msb =
+      builder.createUnaryOp(spv::OpBitcast, type_uint, denormal_mantissa_msb);
+  // denormal_f32_unbiased_exponent = 1 - (7 - findMSB(f10_mantissa))
+  // Or:
+  // denormal_f32_unbiased_exponent = findMSB(f10_mantissa) - 6
+  spv::Id denormal_f32_unbiased_exponent =
+      builder.createBinOp(spv::OpISub, type_uint, denormal_mantissa_msb,
+                          builder.makeUintConstant(6));
+  // Normalize the mantissa.
+  // denormal_f32_mantissa = f10_mantissa << (7 - findMSB(f10_mantissa))
+  spv::Id denormal_f32_mantissa = builder.createBinOp(
+      spv::OpShiftLeftLogical, type_uint, f10_mantissa,
+      builder.createBinOp(spv::OpISub, type_uint, builder.makeUintConstant(7),
+                          denormal_mantissa_msb));
+  // If the 7e3 number is zero, make sure the float32 number is zero too.
+  spv::Id f10_mantissa_is_nonzero = builder.createBinOp(
+      spv::OpINotEqual, type_bool, f10_mantissa, builder.makeUintConstant(0));
+  // Set the unbiased exponent to -124 for zero - 124 will be added later,
+  // resulting in zero float32.
+  denormal_f32_unbiased_exponent = builder.createTriOp(
+      spv::OpSelect, type_uint, f10_mantissa_is_nonzero,
+      denormal_f32_unbiased_exponent, builder.makeUintConstant(uint32_t(-124)));
+  denormal_f32_mantissa =
+      builder.createTriOp(spv::OpSelect, type_uint, f10_mantissa_is_nonzero,
+                          denormal_f32_mantissa, builder.makeUintConstant(0));
+
+  // Select the needed conversion depending on whether the number is normal.
+  spv::Id f10_is_normal =
+      builder.createBinOp(spv::OpINotEqual, type_bool, f10_unbiased_exponent,
+                          builder.makeUintConstant(0));
+  spv::Id f32_unbiased_exponent = builder.createTriOp(
+      spv::OpSelect, type_uint, f10_is_normal, f10_unbiased_exponent,
+      denormal_f32_unbiased_exponent);
+  spv::Id f32_mantissa =
+      builder.createTriOp(spv::OpSelect, type_uint, f10_is_normal, f10_mantissa,
+                          denormal_f32_mantissa);
+
+  // Bias the exponent and construct the build the float32 number.
+  spv::Id f32_shifted;
+  {
+    spv::Instruction* f32_insert_instruction = new spv::Instruction(
+        builder.getUniqueId(), type_uint, spv::OpBitFieldInsert);
+    f32_insert_instruction->addIdOperand(f32_mantissa);
+    f32_insert_instruction->addIdOperand(
+        builder.createBinOp(spv::OpIAdd, type_uint, f32_unbiased_exponent,
+                            builder.makeUintConstant(124)));
+    f32_insert_instruction->addIdOperand(builder.makeUintConstant(7));
+    f32_insert_instruction->addIdOperand(builder.makeUintConstant(8));
+    builder.getBuildPoint()->addInstruction(
+        std::unique_ptr<spv::Instruction>(f32_insert_instruction));
+    f32_shifted = f32_insert_instruction->getResultId();
+  }
+  spv::Id f32 =
+      builder.createBinOp(spv::OpShiftLeftLogical, type_uint, f32_shifted,
+                          builder.makeUintConstant(23 - 7));
+
+  if (!result_as_uint) {
+    f32 = builder.createUnaryOp(spv::OpBitcast, builder.makeFloatType(32), f32);
+  }
+
+  return f32;
+}
+
+spv::Id SpirvShaderTranslator::PreClampedDepthTo20e4(
+    SpirvBuilder& builder, spv::Id f32_scalar, bool round_to_nearest_even,
+    bool remap_from_0_to_0_5, spv::Id ext_inst_glsl_std_450) {
+  // CFloat24 from d3dref9.dll +
+  // https://github.com/Microsoft/DirectXTex/blob/master/DirectXTex/DirectXTexConvert.cpp
+  // Assuming the value is already clamped to [0, 2) (in all places, the depth
+  // is written with saturation).
+
+  uint32_t remap_bias = uint32_t(remap_from_0_to_0_5);
+
+  spv::Id type_uint = builder.makeUintType(32);
+
+  // Need the source as uint for bit operations.
+  {
+    spv::Id source_type = builder.getTypeId(f32_scalar);
+    assert_true(builder.isScalarType(source_type));
+    if (!builder.isUintType(source_type)) {
+      f32_scalar = builder.createUnaryOp(spv::OpBitcast, type_uint, f32_scalar);
+    }
+  }
+
+  // The denormal 20e4 case.
+  // denormal_biased_f32 = (f32 & 0x7FFFFF) | 0x800000
+  spv::Id denormal_biased_f32;
+  {
+    spv::Instruction* denormal_insert_instruction = new spv::Instruction(
+        builder.getUniqueId(), type_uint, spv::OpBitFieldInsert);
+    denormal_insert_instruction->addIdOperand(f32_scalar);
+    denormal_insert_instruction->addIdOperand(builder.makeUintConstant(1));
+    denormal_insert_instruction->addIdOperand(builder.makeUintConstant(23));
+    denormal_insert_instruction->addIdOperand(builder.makeUintConstant(9));
+    builder.getBuildPoint()->addInstruction(
+        std::unique_ptr<spv::Instruction>(denormal_insert_instruction));
+    denormal_biased_f32 = denormal_insert_instruction->getResultId();
+  }
+  // denormal_biased_f32_shift_amount = min(113 - (f32 >> 23), 24)
+  // Not allowing the shift to overflow as that's undefined in SPIR-V.
+  spv::Id denormal_biased_f32_shift_amount;
+  {
+    spv::Instruction* denormal_shift_amount_instruction =
+        new spv::Instruction(builder.getUniqueId(), type_uint, spv::OpExtInst);
+    denormal_shift_amount_instruction->addIdOperand(ext_inst_glsl_std_450);
+    denormal_shift_amount_instruction->addImmediateOperand(GLSLstd450UMin);
+    denormal_shift_amount_instruction->addIdOperand(builder.createBinOp(
+        spv::OpISub, type_uint, builder.makeUintConstant(113 - remap_bias),
+        builder.createBinOp(spv::OpShiftRightLogical, type_uint, f32_scalar,
+                            builder.makeUintConstant(23))));
+    denormal_shift_amount_instruction->addIdOperand(
+        builder.makeUintConstant(24));
+    builder.getBuildPoint()->addInstruction(
+        std::unique_ptr<spv::Instruction>(denormal_shift_amount_instruction));
+    denormal_biased_f32_shift_amount =
+        denormal_shift_amount_instruction->getResultId();
+  }
+  // denormal_biased_f32 =
+  //     ((f32 & 0x7FFFFF) | 0x800000) >> min(113 - (f32 >> 23), 24)
+  denormal_biased_f32 = builder.createBinOp(spv::OpShiftRightLogical, type_uint,
+                                            denormal_biased_f32,
+                                            denormal_biased_f32_shift_amount);
+
+  // The normal 20e4 case.
+  // Bias the exponent.
+  // normal_biased_f32 = f32 - (112 << 23)
+  spv::Id normal_biased_f32 = builder.createBinOp(
+      spv::OpISub, type_uint, f32_scalar,
+      builder.makeUintConstant((UINT32_C(112) - remap_bias) << 23));
+
+  // Select the needed conversion depending on whether the number is too small
+  // to be represented as normalized 20e4.
+  spv::Id biased_f32 = builder.createTriOp(
+      spv::OpSelect, type_uint,
+      builder.createBinOp(
+          spv::OpULessThan, builder.makeBoolType(), f32_scalar,
+          builder.makeUintConstant(0x38800000 - (remap_bias << 23))),
+      denormal_biased_f32, normal_biased_f32);
+
+  // Build the 20e4 number rounding to the nearest even or towards zero.
+  if (round_to_nearest_even) {
+    // biased_f32 += 3 + ((biased_f32 >> 3) & 1)
+    biased_f32 = builder.createBinOp(
+        spv::OpIAdd, type_uint,
+        builder.createBinOp(spv::OpIAdd, type_uint, biased_f32,
+                            builder.makeUintConstant(3)),
+        builder.createTriOp(spv::OpBitFieldUExtract, type_uint, biased_f32,
+                            builder.makeUintConstant(3),
+                            builder.makeUintConstant(1)));
+  }
+  return builder.createTriOp(spv::OpBitFieldUExtract, type_uint, biased_f32,
+                             builder.makeUintConstant(3),
+                             builder.makeUintConstant(24));
+}
+
+spv::Id SpirvShaderTranslator::Depth20e4To32(SpirvBuilder& builder,
+                                             spv::Id f24_uint_scalar,
+                                             uint32_t f24_shift,
+                                             bool remap_to_0_to_0_5,
+                                             bool result_as_uint,
+                                             spv::Id ext_inst_glsl_std_450) {
+  // CFloat24 from d3dref9.dll +
+  // https://github.com/Microsoft/DirectXTex/blob/master/DirectXTex/DirectXTexConvert.cpp
+
+  assert_true(builder.isUintType(builder.getTypeId(f24_uint_scalar)));
+  assert_true(f24_shift <= (32 - 24));
+
+  uint32_t remap_bias = uint32_t(remap_to_0_to_0_5);
+
+  spv::Id type_bool = builder.makeBoolType();
+  spv::Id type_int = builder.makeIntType(32);
+  spv::Id type_uint = builder.makeUintType(32);
+
+  spv::Id f24_unbiased_exponent = builder.createTriOp(
+      spv::OpBitFieldUExtract, type_uint, f24_uint_scalar,
+      builder.makeUintConstant(f24_shift + 20), builder.makeUintConstant(4));
+  spv::Id f24_mantissa = builder.createTriOp(
+      spv::OpBitFieldUExtract, type_uint, f24_uint_scalar,
+      builder.makeUintConstant(f24_shift), builder.makeUintConstant(20));
+
+  // The denormal nonzero 20e4 case.
+  // denormal_mantissa_msb = findMSB(f24_mantissa)
+  spv::Id denormal_mantissa_msb;
+  {
+    spv::Instruction* denormal_mantissa_msb_instruction =
+        new spv::Instruction(builder.getUniqueId(), type_int, spv::OpExtInst);
+    denormal_mantissa_msb_instruction->addIdOperand(ext_inst_glsl_std_450);
+    denormal_mantissa_msb_instruction->addImmediateOperand(GLSLstd450FindUMsb);
+    denormal_mantissa_msb_instruction->addIdOperand(f24_mantissa);
+    builder.getBuildPoint()->addInstruction(
+        std::unique_ptr<spv::Instruction>(denormal_mantissa_msb_instruction));
+    denormal_mantissa_msb = denormal_mantissa_msb_instruction->getResultId();
+  }
+  denormal_mantissa_msb =
+      builder.createUnaryOp(spv::OpBitcast, type_uint, denormal_mantissa_msb);
+  // denormal_f32_unbiased_exponent = 1 - (20 - findMSB(f24_mantissa))
+  // Or:
+  // denormal_f32_unbiased_exponent = findMSB(f24_mantissa) - 19
+  spv::Id denormal_f32_unbiased_exponent =
+      builder.createBinOp(spv::OpISub, type_uint, denormal_mantissa_msb,
+                          builder.makeUintConstant(19));
+  // Normalize the mantissa.
+  // denormal_f32_mantissa = f24_mantissa << (20 - findMSB(f24_mantissa))
+  spv::Id denormal_f32_mantissa = builder.createBinOp(
+      spv::OpShiftLeftLogical, type_uint, f24_mantissa,
+      builder.createBinOp(spv::OpISub, type_uint, builder.makeUintConstant(20),
+                          denormal_mantissa_msb));
+  // If the 20e4 number is zero, make sure the float32 number is zero too.
+  spv::Id f24_mantissa_is_nonzero = builder.createBinOp(
+      spv::OpINotEqual, type_bool, f24_mantissa, builder.makeUintConstant(0));
+  // Set the unbiased exponent to -112 for zero - 112 will be added later,
+  // resulting in zero float32.
+  denormal_f32_unbiased_exponent = builder.createTriOp(
+      spv::OpSelect, type_uint, f24_mantissa_is_nonzero,
+      denormal_f32_unbiased_exponent,
+      builder.makeUintConstant(uint32_t(-int32_t(112 - remap_bias))));
+  denormal_f32_mantissa =
+      builder.createTriOp(spv::OpSelect, type_uint, f24_mantissa_is_nonzero,
+                          denormal_f32_mantissa, builder.makeUintConstant(0));
+
+  // Select the needed conversion depending on whether the number is normal.
+  spv::Id f24_is_normal =
+      builder.createBinOp(spv::OpINotEqual, type_bool, f24_unbiased_exponent,
+                          builder.makeUintConstant(0));
+  spv::Id f32_unbiased_exponent = builder.createTriOp(
+      spv::OpSelect, type_uint, f24_is_normal, f24_unbiased_exponent,
+      denormal_f32_unbiased_exponent);
+  spv::Id f32_mantissa =
+      builder.createTriOp(spv::OpSelect, type_uint, f24_is_normal, f24_mantissa,
+                          denormal_f32_mantissa);
+
+  // Bias the exponent and construct the build the float32 number.
+  spv::Id f32_shifted;
+  {
+    spv::Instruction* f32_insert_instruction = new spv::Instruction(
+        builder.getUniqueId(), type_uint, spv::OpBitFieldInsert);
+    f32_insert_instruction->addIdOperand(f32_mantissa);
+    f32_insert_instruction->addIdOperand(
+        builder.createBinOp(spv::OpIAdd, type_uint, f32_unbiased_exponent,
+                            builder.makeUintConstant(112 - remap_bias)));
+    f32_insert_instruction->addIdOperand(builder.makeUintConstant(20));
+    f32_insert_instruction->addIdOperand(builder.makeUintConstant(8));
+    builder.getBuildPoint()->addInstruction(
+        std::unique_ptr<spv::Instruction>(f32_insert_instruction));
+    f32_shifted = f32_insert_instruction->getResultId();
+  }
+  spv::Id f32 =
+      builder.createBinOp(spv::OpShiftLeftLogical, type_uint, f32_shifted,
+                          builder.makeUintConstant(23 - 20));
+
+  if (!result_as_uint) {
+    f32 = builder.createUnaryOp(spv::OpBitcast, builder.makeFloatType(32), f32);
+  }
+
+  return f32;
+}
+
+void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
+  // Loaded if needed.
+  spv::Id msaa_samples = spv::NoResult;
+
+  if (edram_fragment_shader_interlock_ && !FSI_IsDepthStencilEarly()) {
+    if (msaa_samples == spv::NoResult) {
+      msaa_samples = LoadMsaaSamplesFromFlags();
+    }
+    // Load the sample mask, which may be modified later by killing from
+    // different sources, if not loaded already.
+    FSI_LoadSampleMask(msaa_samples);
+  }
+
+  bool fsi_pixel_potentially_killed = false;
+
+  if (current_shader().kills_pixels()) {
+    if (edram_fragment_shader_interlock_) {
+      fsi_pixel_potentially_killed = true;
+      if (!features_.demote_to_helper_invocation) {
+        assert_true(var_main_kill_pixel_ != spv::NoResult);
+        main_fsi_sample_mask_ = builder_->createTriOp(
+            spv::OpSelect, type_uint_,
+            builder_->createLoad(var_main_kill_pixel_, spv::NoPrecision),
+            const_uint_0_, main_fsi_sample_mask_);
+      }
+    } else {
+      if (!features_.demote_to_helper_invocation) {
+        // Kill the pixel once the guest control flow and derivatives are not
+        // needed anymore.
+        assert_true(var_main_kill_pixel_ != spv::NoResult);
+        SpirvBuilder::IfBuilder kill_pixel_if(
+            builder_->createLoad(var_main_kill_pixel_, spv::NoPrecision),
+            spv::SelectionControlMaskNone, *builder_);
+        // TODO(Triang3l): Use OpTerminateInvocation when SPIR-V 1.6 is
+        // targeted.
+        builder_->createNoResultOp(spv::OpKill);
+        // OpKill terminates the block.
+        kill_pixel_if.makeEndIf(false);
+      }
+    }
+  }
+
+  uint32_t color_targets_written = current_shader().writes_color_targets();
+
+  if ((color_targets_written & 0b1) && !IsExecutionModeEarlyFragmentTests()) {
+    spv::Id fsi_sample_mask_in_rt_0_alpha_tests = spv::NoResult;
+    spv::Block* block_rt_0_alpha_tests_rt_written_head = nullptr;
+    spv::Block* block_rt_0_alpha_tests_rt_written_merge = nullptr;
+    builder_->makeNewBlock();
+    if (var_main_fsi_color_written_ != spv::NoResult) {
+      // Skip the alpha test and alpha to coverage if the render target 0 is not
+      // written to dynamically. This check is used by both FSI and FBO paths.
+      if (edram_fragment_shader_interlock_) {
+        fsi_sample_mask_in_rt_0_alpha_tests = main_fsi_sample_mask_;
+      }
+      spv::Id rt_0_written = builder_->createBinOp(
+          spv::OpINotEqual, type_bool_,
+          builder_->createBinOp(
+              spv::OpBitwiseAnd, type_uint_,
+              builder_->createLoad(var_main_fsi_color_written_,
+                                   spv::NoPrecision),
+              builder_->makeUintConstant(0b1)),
+          const_uint_0_);
+      block_rt_0_alpha_tests_rt_written_head = builder_->getBuildPoint();
+      spv::Block& block_rt_0_alpha_tests_rt_written = builder_->makeNewBlock();
+      block_rt_0_alpha_tests_rt_written_merge = &builder_->makeNewBlock();
+      builder_->createSelectionMerge(block_rt_0_alpha_tests_rt_written_merge,
+                                     spv::SelectionControlDontFlattenMask);
+      {
+        std::unique_ptr<spv::Instruction> rt_0_written_branch_conditional_op =
+            std::make_unique<spv::Instruction>(spv::OpBranchConditional);
+        rt_0_written_branch_conditional_op->addIdOperand(rt_0_written);
+        rt_0_written_branch_conditional_op->addIdOperand(
+            block_rt_0_alpha_tests_rt_written.getId());
+        rt_0_written_branch_conditional_op->addIdOperand(
+            block_rt_0_alpha_tests_rt_written_merge->getId());
+        // More likely to write to the render target 0 than not.
+        rt_0_written_branch_conditional_op->addImmediateOperand(2);
+        rt_0_written_branch_conditional_op->addImmediateOperand(1);
+        builder_->getBuildPoint()->addInstruction(
+            std::move(rt_0_written_branch_conditional_op));
+      }
+      block_rt_0_alpha_tests_rt_written.addPredecessor(
+          block_rt_0_alpha_tests_rt_written_head);
+      block_rt_0_alpha_tests_rt_written_merge->addPredecessor(
+          block_rt_0_alpha_tests_rt_written_head);
+      builder_->setBuildPoint(&block_rt_0_alpha_tests_rt_written);
+    }
+
+    // Alpha test.
+    // TODO(Triang3l): Check how alpha test works with NaN on Direct3D 9.
+    // Extract the comparison function (less, equal, greater bits).
+    spv::Id alpha_test_function = builder_->createTriOp(
+        spv::OpBitFieldUExtract, type_uint_, main_system_constant_flags_,
+        builder_->makeUintConstant(kSysFlag_AlphaPassIfLess_Shift),
+        builder_->makeUintConstant(3));
+    // Check if the comparison function is not "always" - that should pass even
+    // for NaN likely, unlike "less, equal or greater".
+    SpirvBuilder::IfBuilder if_alpha_test_function_is_non_always(
+        builder_->createBinOp(spv::OpINotEqual, type_bool_, alpha_test_function,
+                              builder_->makeUintConstant(
+                                  uint32_t(xenos::CompareFunction::kAlways))),
+        spv::SelectionControlDontFlattenMask, *builder_);
+    {
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(builder_->makeIntConstant(3));
+      spv::Id alpha_test_alpha = builder_->createLoad(
+          builder_->createAccessChain(spv::StorageClassFunction,
+                                      output_or_var_fragment_data_[0],
+                                      id_vector_temp_),
+          spv::NoPrecision);
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(
+          builder_->makeIntConstant(kSystemConstantAlphaTestReference));
+      spv::Id alpha_test_reference =
+          builder_->createLoad(builder_->createAccessChain(
+                                   spv::StorageClassUniform,
+                                   uniform_system_constants_, id_vector_temp_),
+                               spv::NoPrecision);
+      // The comparison function is not "always" - perform the alpha test.
+      // Handle "not equal" specially (specifically as "not equal" so it's true
+      // for NaN, not "less or greater" which is false for NaN).
+      SpirvBuilder::IfBuilder if_alpha_test_function_is_not_equal(
+          builder_->createBinOp(spv::OpIEqual, type_bool_, alpha_test_function,
+                                builder_->makeUintConstant(uint32_t(
+                                    xenos::CompareFunction::kNotEqual))),
+          spv::SelectionControlDontFlattenMask, *builder_, 1, 2);
+      spv::Id alpha_test_result_not_equal;
+      {
+        // "Not equal" function.
+        alpha_test_result_not_equal =
+            builder_->createBinOp(spv::OpFUnordNotEqual, type_bool_,
+                                  alpha_test_alpha, alpha_test_reference);
+      }
+      if_alpha_test_function_is_not_equal.makeBeginElse();
+      spv::Id alpha_test_result_non_not_equal;
+      {
+        // Function other than "not equal".
+        static constexpr spv::Op kAlphaTestOps[] = {
+            spv::OpFOrdLessThan, spv::OpFOrdEqual, spv::OpFOrdGreaterThan};
+        for (uint32_t i = 0; i < 3; ++i) {
+          spv::Id alpha_test_comparison_result = builder_->createBinOp(
+              spv::OpLogicalAnd, type_bool_,
+              builder_->createBinOp(kAlphaTestOps[i], type_bool_,
+                                    alpha_test_alpha, alpha_test_reference),
+              builder_->createBinOp(
+                  spv::OpINotEqual, type_bool_,
+                  builder_->createBinOp(
+                      spv::OpBitwiseAnd, type_uint_, alpha_test_function,
+                      builder_->makeUintConstant(UINT32_C(1) << i)),
+                  const_uint_0_));
+          if (i) {
+            alpha_test_result_non_not_equal = builder_->createBinOp(
+                spv::OpLogicalOr, type_bool_, alpha_test_result_non_not_equal,
+                alpha_test_comparison_result);
+          } else {
+            alpha_test_result_non_not_equal = alpha_test_comparison_result;
+          }
+        }
+      }
+      if_alpha_test_function_is_not_equal.makeEndIf();
+      spv::Id alpha_test_result =
+          if_alpha_test_function_is_not_equal.createMergePhi(
+              alpha_test_result_not_equal, alpha_test_result_non_not_equal);
+      // Discard the pixel if the alpha test has failed.
+      if (edram_fragment_shader_interlock_ &&
+          !features_.demote_to_helper_invocation) {
+        fsi_pixel_potentially_killed = true;
+        fsi_sample_mask_in_rt_0_alpha_tests = builder_->createTriOp(
+            spv::OpSelect, type_uint_, alpha_test_result,
+            fsi_sample_mask_in_rt_0_alpha_tests, const_uint_0_);
+      } else {
+        SpirvBuilder::IfBuilder alpha_test_kill_if(
+            builder_->createUnaryOp(spv::OpLogicalNot, type_bool_,
+                                    alpha_test_result),
+            spv::SelectionControlDontFlattenMask, *builder_);
+        bool branch_to_alpha_test_kill_merge = true;
+        if (edram_fragment_shader_interlock_) {
+          assert_true(features_.demote_to_helper_invocation);
+          fsi_pixel_potentially_killed = true;
+          // TODO(Triang3l): Promoted to SPIR-V 1.6 - don't add the extension
+          // there.
+          builder_->addExtension("SPV_EXT_demote_to_helper_invocation");
+          builder_->addCapability(spv::CapabilityDemoteToHelperInvocationEXT);
+          builder_->createNoResultOp(spv::OpDemoteToHelperInvocationEXT);
+        } else {
+          // TODO(Triang3l): Use OpTerminateInvocation when SPIR-V 1.6 is
+          // targeted.
+          builder_->createNoResultOp(spv::OpKill);
+          // OpKill terminates the block.
+          branch_to_alpha_test_kill_merge = false;
+        }
+        alpha_test_kill_if.makeEndIf(branch_to_alpha_test_kill_merge);
+      }
+    }
+    if_alpha_test_function_is_non_always.makeEndIf();
+
+    // Alpha to coverage.
+    FSI_AlphaToMask();
+
+    if (block_rt_0_alpha_tests_rt_written_merge) {
+      // Close the render target 0 written check (used by both FSI and FBO).
+      builder_->createBranch(block_rt_0_alpha_tests_rt_written_merge);
+      spv::Block& block_rt_0_alpha_tests_rt_written_end =
+          *builder_->getBuildPoint();
+      builder_->setBuildPoint(block_rt_0_alpha_tests_rt_written_merge);
+      if (edram_fragment_shader_interlock_ &&
+          !features_.demote_to_helper_invocation) {
+        // The tests might have modified the sample mask via
+        // fsi_sample_mask_in_rt_0_alpha_tests.
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(fsi_sample_mask_in_rt_0_alpha_tests);
+        id_vector_temp_.push_back(
+            block_rt_0_alpha_tests_rt_written_end.getId());
+        id_vector_temp_.push_back(main_fsi_sample_mask_);
+        id_vector_temp_.push_back(
+            block_rt_0_alpha_tests_rt_written_head->getId());
+        main_fsi_sample_mask_ =
+            builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+      } else if (edram_fragment_shader_interlock_) {
+        // Demote path: the alpha test demotes instead of touching the mask, but
+        // alpha to coverage still modified main_fsi_sample_mask_ inside the
+        // written branch. Merge in the pre-branch mask
+        // (fsi_sample_mask_in_rt_0_alpha_tests) on the not-written edge so the
+        // value dominates the merge. Otherwise it is undefined there (invalid
+        // SPIR-V dominance and garbage coverage).
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(main_fsi_sample_mask_);
+        id_vector_temp_.push_back(
+            block_rt_0_alpha_tests_rt_written_end.getId());
+        id_vector_temp_.push_back(fsi_sample_mask_in_rt_0_alpha_tests);
+        id_vector_temp_.push_back(
+            block_rt_0_alpha_tests_rt_written_head->getId());
+        main_fsi_sample_mask_ =
+            builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+      }
+    }
+  }
+
+  spv::Block* block_fsi_if_after_kill = nullptr;
+  spv::Block* block_fsi_if_after_kill_merge = nullptr;
+
+  spv::Block* block_fsi_if_after_depth_stencil = nullptr;
+  spv::Block* block_fsi_if_after_depth_stencil_merge = nullptr;
+
+  if (edram_fragment_shader_interlock_) {
+    if (fsi_pixel_potentially_killed) {
+      if (features_.demote_to_helper_invocation) {
+        // Don't do anything related to writing to the EDRAM if the pixel was
+        // killed.
+        id_vector_temp_.clear();
+        // TODO(Triang3l): Use HelperInvocation volatile load on SPIR-V 1.6.
+        main_fsi_sample_mask_ = builder_->createTriOp(
+            spv::OpSelect, type_uint_,
+            builder_->createOp(spv::OpIsHelperInvocationEXT, type_bool_,
+                               id_vector_temp_),
+            const_uint_0_, main_fsi_sample_mask_);
+      }
+      // Check the condition before the OpSelectionMerge, which must be the
+      // penultimate instruction in a block.
+      spv::Id pixel_not_killed = builder_->createBinOp(
+          spv::OpINotEqual, type_bool_, main_fsi_sample_mask_, const_uint_0_);
+      block_fsi_if_after_kill = &builder_->makeNewBlock();
+      block_fsi_if_after_kill_merge = &builder_->makeNewBlock();
+      builder_->createSelectionMerge(block_fsi_if_after_kill_merge,
+                                     spv::SelectionControlDontFlattenMask);
+      builder_->createConditionalBranch(pixel_not_killed,
+                                        block_fsi_if_after_kill,
+                                        block_fsi_if_after_kill_merge);
+      builder_->setBuildPoint(block_fsi_if_after_kill);
+    }
+
+    spv::Id color_write_depth_stencil_condition = spv::NoResult;
+    if (FSI_IsDepthStencilEarly()) {
+      // Perform late depth / stencil writes for samples not discarded.
+      for (uint32_t i = 0; i < 4; ++i) {
+        spv::Id sample_late_depth_stencil_write_needed = builder_->createBinOp(
+            spv::OpINotEqual, type_bool_,
+            builder_->createBinOp(
+                spv::OpBitwiseAnd, type_uint_, main_fsi_sample_mask_,
+                builder_->makeUintConstant(uint32_t(1) << (4 + i))),
+            const_uint_0_);
+        SpirvBuilder::IfBuilder if_sample_late_depth_stencil_write_needed(
+            sample_late_depth_stencil_write_needed,
+            spv::SelectionControlDontFlattenMask, *builder_);
+        spv::Id depth_stencil_sample_address =
+            FSI_AddSampleOffset(main_fsi_address_depth_, i);
+        id_vector_temp_.clear();
+        // First SSBO structure element.
+        id_vector_temp_.push_back(const_int_0_);
+        id_vector_temp_.push_back(depth_stencil_sample_address);
+        builder_->createStore(
+            main_fsi_late_write_depth_stencil_[i],
+            builder_->createAccessChain(features_.spirv_version >= spv::Spv_1_3
+                                            ? spv::StorageClassStorageBuffer
+                                            : spv::StorageClassUniform,
+                                        buffer_edram_, id_vector_temp_));
+        if_sample_late_depth_stencil_write_needed.makeEndIf();
+      }
+      if (color_targets_written) {
+        // Only take the remaining coverage bits, not the late depth / stencil
+        // write bits, into account in the check whether anything needs to be
+        // done for the color targets.
+        color_write_depth_stencil_condition = builder_->createBinOp(
+            spv::OpINotEqual, type_bool_,
+            builder_->createBinOp(
+                spv::OpBitwiseAnd, type_uint_, main_fsi_sample_mask_,
+                builder_->makeUintConstant((uint32_t(1) << 4) - 1)),
+            const_uint_0_);
+      }
+    } else {
+      if (msaa_samples == spv::NoResult) {
+        msaa_samples = LoadMsaaSamplesFromFlags();
+      }
+      FSI_LoadEdramOffsets(msaa_samples);
+      // Begin the critical section on the outermost control flow level so it's
+      // entered exactly once on any control flow path as required by the SPIR-V
+      // extension specification.
+      builder_->createNoResultOp(spv::OpBeginInvocationInterlockEXT);
+      // Do the depth / stencil test.
+      // The sample mask might have been made narrower than the initially loaded
+      // mask by various conditions that discard the whole pixel, as well as by
+      // alpha to coverage.
+      FSI_DepthStencilTest(msaa_samples, fsi_pixel_potentially_killed ||
+                                             (color_targets_written & 0b1));
+      if (color_targets_written) {
+        // Only bits 0:3 of main_fsi_sample_mask_ are written by the late
+        // depth / stencil test.
+        color_write_depth_stencil_condition = builder_->createBinOp(
+            spv::OpINotEqual, type_bool_, main_fsi_sample_mask_, const_uint_0_);
+      }
+    }
+
+    FSI_AddPassedMSAASamplesToZPD();
+
+    if (color_write_depth_stencil_condition != spv::NoResult) {
+      // Skip all color operations if the pixel has failed the tests entirely.
+      block_fsi_if_after_depth_stencil = &builder_->makeNewBlock();
+      block_fsi_if_after_depth_stencil_merge = &builder_->makeNewBlock();
+      builder_->createSelectionMerge(block_fsi_if_after_depth_stencil_merge,
+                                     spv::SelectionControlDontFlattenMask);
+      builder_->createConditionalBranch(color_write_depth_stencil_condition,
+                                        block_fsi_if_after_depth_stencil,
+                                        block_fsi_if_after_depth_stencil_merge);
+      builder_->setBuildPoint(block_fsi_if_after_depth_stencil);
+    }
+  }
+
+  if (color_targets_written) {
+    spv::Id fsi_color_targets_written = spv::NoResult;
+    spv::Id fsi_const_int_1 = spv::NoResult;
+    spv::Id fsi_const_edram_size_dwords = spv::NoResult;
+    spv::Id fsi_samples_covered[4] = {};
+    if (edram_fragment_shader_interlock_) {
+      fsi_color_targets_written =
+          builder_->createLoad(var_main_fsi_color_written_, spv::NoPrecision);
+      fsi_const_int_1 = builder_->makeIntConstant(1);
+      // Apply resolution scaling to EDRAM size.
+      fsi_const_edram_size_dwords = builder_->makeUintConstant(
+          xenos::kEdramTileWidthSamples * draw_resolution_scale_x_ *
+          xenos::kEdramTileHeightSamples * draw_resolution_scale_y_ *
+          xenos::kEdramTileCount);
+      for (uint32_t i = 0; i < 4; ++i) {
+        fsi_samples_covered[i] = builder_->createBinOp(
+            spv::OpINotEqual, type_bool_,
+            builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                  main_fsi_sample_mask_,
+                                  builder_->makeUintConstant(uint32_t(1) << i)),
+            const_uint_0_);
+      }
+    }
+    uint32_t color_targets_remaining = color_targets_written;
+    uint32_t color_target_index;
+    while (xe::bit_scan_forward(color_targets_remaining, &color_target_index)) {
+      color_targets_remaining &= ~(UINT32_C(1) << color_target_index);
+      spv::Id color_variable = output_or_var_fragment_data_[color_target_index];
+      spv::Id color = builder_->createLoad(color_variable, spv::NoPrecision);
+
+      // Apply the exponent bias after the alpha test and alpha to coverage
+      // because they need the unbiased alpha from the shader.
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(
+          builder_->makeIntConstant(kSystemConstantColorExpBias));
+      id_vector_temp_.push_back(
+          builder_->makeIntConstant(int32_t(color_target_index)));
+      color = builder_->createNoContractionBinOp(
+          spv::OpVectorTimesScalar, type_float4_, color,
+          builder_->createLoad(builder_->createAccessChain(
+                                   spv::StorageClassUniform,
+                                   uniform_system_constants_, id_vector_temp_),
+                               spv::NoPrecision));
+
+      if (edram_fragment_shader_interlock_) {
+        // Write the color to the target in the EDRAM only it was written on the
+        // shader's execution path, according to the Direct3D 9 rules that games
+        // rely on.
+        spv::Id fsi_color_written = builder_->createBinOp(
+            spv::OpINotEqual, type_bool_,
+            builder_->createBinOp(
+                spv::OpBitwiseAnd, type_uint_, fsi_color_targets_written,
+                builder_->makeUintConstant(uint32_t(1) << color_target_index)),
+            const_uint_0_);
+        // More likely to write to the render target than not.
+        SpirvBuilder::IfBuilder if_fsi_color_written(
+            fsi_color_written, spv::SelectionControlDontFlattenMask, *builder_,
+            2, 1);
+
+        // For accessing uint2 arrays of per-render-target data which are passed
+        // as uint4 arrays due to std140 array element alignment.
+        spv::Id rt_uint2_index_array =
+            builder_->makeIntConstant(color_target_index >> 1);
+        spv::Id rt_uint2_index_element[] = {
+            builder_->makeIntConstant((color_target_index & 1) << 1),
+            builder_->makeIntConstant(((color_target_index & 1) << 1) + 1),
+        };
+
+        // Load the mask of the bits of the destination color that should be
+        // preserved (in 32-bit halves), which are 0, 0 if the color is fully
+        // overwritten, or UINT32_MAX, UINT32_MAX if writing to the target is
+        // disabled completely.
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(
+            builder_->makeIntConstant(kSystemConstantEdramRTKeepMask));
+        id_vector_temp_.push_back(rt_uint2_index_array);
+        id_vector_temp_.push_back(rt_uint2_index_element[0]);
+        spv::Id rt_keep_mask[2];
+        rt_keep_mask[0] = builder_->createLoad(
+            builder_->createAccessChain(spv::StorageClassUniform,
+                                        uniform_system_constants_,
+                                        id_vector_temp_),
+            spv::NoPrecision);
+        id_vector_temp_.back() = rt_uint2_index_element[1];
+        rt_keep_mask[1] = builder_->createLoad(
+            builder_->createAccessChain(spv::StorageClassUniform,
+                                        uniform_system_constants_,
+                                        id_vector_temp_),
+            spv::NoPrecision);
+
+        // Check if writing to the render target is not disabled completely.
+        spv::Id const_uint32_max = builder_->makeUintConstant(UINT32_MAX);
+        spv::Id rt_write_mask_not_empty = builder_->createBinOp(
+            spv::OpLogicalOr, type_bool_,
+            builder_->createBinOp(spv::OpINotEqual, type_bool_, rt_keep_mask[0],
+                                  const_uint32_max),
+            builder_->createBinOp(spv::OpINotEqual, type_bool_, rt_keep_mask[1],
+                                  const_uint32_max));
+        SpirvBuilder::IfBuilder if_rt_write_mask_not_empty(
+            rt_write_mask_not_empty, spv::SelectionControlDontFlattenMask,
+            *builder_);
+
+        spv::Id const_int_rt_index =
+            builder_->makeIntConstant(color_target_index);
+
+        // Load the information about the render target.
+
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(
+            builder_->makeIntConstant(kSystemConstantEdramRTFormatFlags));
+        id_vector_temp_.push_back(const_int_rt_index);
+        spv::Id rt_format_with_flags = builder_->createLoad(
+            builder_->createAccessChain(spv::StorageClassUniform,
+                                        uniform_system_constants_,
+                                        id_vector_temp_),
+            spv::NoPrecision);
+
+        spv::Id rt_is_64bpp = builder_->createBinOp(
+            spv::OpINotEqual, type_bool_,
+            builder_->createBinOp(
+                spv::OpBitwiseAnd, type_uint_, rt_format_with_flags,
+                builder_->makeUintConstant(
+                    RenderTargetCache::kPSIColorFormatFlag_64bpp)),
+            const_uint_0_);
+
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(
+            builder_->makeIntConstant(kSystemConstantEdramRTBaseDwordsScaled));
+        id_vector_temp_.push_back(const_int_rt_index);
+        // EDRAM addresses are wrapped on the Xenos (modulo the EDRAM size).
+        spv::Id rt_sample_0_address = builder_->createUnaryOp(
+            spv::OpBitcast, type_int_,
+            builder_->createBinOp(
+                spv::OpUMod, type_uint_,
+                builder_->createBinOp(
+                    spv::OpIAdd, type_uint_,
+                    builder_->createLoad(
+                        builder_->createAccessChain(spv::StorageClassUniform,
+                                                    uniform_system_constants_,
+                                                    id_vector_temp_),
+                        spv::NoPrecision),
+                    builder_->createTriOp(spv::OpSelect, type_uint_,
+                                          rt_is_64bpp, main_fsi_offset_64bpp_,
+                                          main_fsi_offset_32bpp_)),
+                fsi_const_edram_size_dwords));
+
+        // Load the blending parameters for the render target.
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(
+            builder_->makeIntConstant(kSystemConstantEdramRTBlendFactorsOps));
+        id_vector_temp_.push_back(const_int_rt_index);
+        spv::Id rt_blend_factors_equations = builder_->createLoad(
+            builder_->createAccessChain(spv::StorageClassUniform,
+                                        uniform_system_constants_,
+                                        id_vector_temp_),
+            spv::NoPrecision);
+
+        // Check if blending (the blending is not 1 * source + 0 * destination).
+        spv::Id rt_blend_enabled = builder_->createBinOp(
+            spv::OpINotEqual, type_bool_, rt_blend_factors_equations,
+            builder_->makeUintConstant(0x00010001));
+        SpirvBuilder::IfBuilder if_rt_blend_enabled(
+            rt_blend_enabled, spv::SelectionControlDontFlattenMask, *builder_);
+        {
+          // Blending path.
+
+          // Get various parameters used in blending.
+          spv::Id rt_color_is_fixed_point = builder_->createBinOp(
+              spv::OpINotEqual, type_bool_,
+              builder_->createBinOp(
+                  spv::OpBitwiseAnd, type_uint_, rt_format_with_flags,
+                  builder_->makeUintConstant(
+                      RenderTargetCache::kPSIColorFormatFlag_FixedPointColor)),
+              const_uint_0_);
+          spv::Id rt_alpha_is_fixed_point = builder_->createBinOp(
+              spv::OpINotEqual, type_bool_,
+              builder_->createBinOp(
+                  spv::OpBitwiseAnd, type_uint_, rt_format_with_flags,
+                  builder_->makeUintConstant(
+                      RenderTargetCache::kPSIColorFormatFlag_FixedPointAlpha)),
+              const_uint_0_);
+          id_vector_temp_.clear();
+          id_vector_temp_.push_back(
+              builder_->makeIntConstant(kSystemConstantEdramRTClamp));
+          id_vector_temp_.push_back(const_int_rt_index);
+          spv::Id rt_clamp = builder_->createLoad(
+              builder_->createAccessChain(spv::StorageClassUniform,
+                                          uniform_system_constants_,
+                                          id_vector_temp_),
+              spv::NoPrecision);
+          spv::Id rt_clamp_color_min = builder_->smearScalar(
+              spv::NoPrecision,
+              builder_->createCompositeExtract(rt_clamp, type_float_, 0),
+              type_float3_);
+          spv::Id rt_clamp_alpha_min =
+              builder_->createCompositeExtract(rt_clamp, type_float_, 1);
+          spv::Id rt_clamp_color_max = builder_->smearScalar(
+              spv::NoPrecision,
+              builder_->createCompositeExtract(rt_clamp, type_float_, 2),
+              type_float3_);
+          spv::Id rt_clamp_alpha_max =
+              builder_->createCompositeExtract(rt_clamp, type_float_, 3);
+
+          spv::Id blend_factor_width = builder_->makeUintConstant(5);
+          spv::Id blend_equation_width = builder_->makeUintConstant(3);
+          spv::Id rt_color_source_factor = builder_->createTriOp(
+              spv::OpBitFieldUExtract, type_uint_, rt_blend_factors_equations,
+              const_uint_0_, blend_factor_width);
+          spv::Id rt_color_equation = builder_->createTriOp(
+              spv::OpBitFieldUExtract, type_uint_, rt_blend_factors_equations,
+              blend_factor_width, blend_equation_width);
+          spv::Id rt_color_dest_factor = builder_->createTriOp(
+              spv::OpBitFieldUExtract, type_uint_, rt_blend_factors_equations,
+              builder_->makeUintConstant(8), blend_factor_width);
+          spv::Id rt_alpha_source_factor = builder_->createTriOp(
+              spv::OpBitFieldUExtract, type_uint_, rt_blend_factors_equations,
+              builder_->makeUintConstant(16), blend_factor_width);
+          spv::Id rt_alpha_equation = builder_->createTriOp(
+              spv::OpBitFieldUExtract, type_uint_, rt_blend_factors_equations,
+              builder_->makeUintConstant(21), blend_equation_width);
+          spv::Id rt_alpha_dest_factor = builder_->createTriOp(
+              spv::OpBitFieldUExtract, type_uint_, rt_blend_factors_equations,
+              builder_->makeUintConstant(24), blend_factor_width);
+
+          id_vector_temp_.clear();
+          id_vector_temp_.push_back(
+              builder_->makeIntConstant(kSystemConstantEdramBlendConstant));
+          spv::Id blend_constant_unclamped = builder_->createLoad(
+              builder_->createAccessChain(spv::StorageClassUniform,
+                                          uniform_system_constants_,
+                                          id_vector_temp_),
+              spv::NoPrecision);
+          uint_vector_temp_.clear();
+          uint_vector_temp_.push_back(0);
+          uint_vector_temp_.push_back(1);
+          uint_vector_temp_.push_back(2);
+          spv::Id blend_constant_color_unclamped =
+              builder_->createRvalueSwizzle(spv::NoPrecision, type_float3_,
+                                            blend_constant_unclamped,
+                                            uint_vector_temp_);
+          spv::Id blend_constant_color_clamped = FSI_FlushNaNClampAndInBlending(
+              blend_constant_color_unclamped, rt_color_is_fixed_point,
+              rt_clamp_color_min, rt_clamp_color_max);
+          spv::Id blend_constant_alpha_clamped = FSI_FlushNaNClampAndInBlending(
+              builder_->createCompositeExtract(blend_constant_unclamped,
+                                               type_float_, 3),
+              rt_alpha_is_fixed_point, rt_clamp_alpha_min, rt_clamp_alpha_max);
+
+          uint_vector_temp_.clear();
+          uint_vector_temp_.push_back(0);
+          uint_vector_temp_.push_back(1);
+          uint_vector_temp_.push_back(2);
+          spv::Id source_color_unclamped = builder_->createRvalueSwizzle(
+              spv::NoPrecision, type_float3_, color, uint_vector_temp_);
+          spv::Id source_color_clamped = FSI_FlushNaNClampAndInBlending(
+              source_color_unclamped, rt_color_is_fixed_point,
+              rt_clamp_color_min, rt_clamp_color_max);
+          spv::Id source_alpha_clamped = FSI_FlushNaNClampAndInBlending(
+              builder_->createCompositeExtract(color, type_float_, 3),
+              rt_alpha_is_fixed_point, rt_clamp_alpha_min, rt_clamp_alpha_max);
+
+          std::array<spv::Id, 2> rt_replace_mask;
+          for (uint32_t i = 0; i < 2; ++i) {
+            rt_replace_mask[i] = builder_->createUnaryOp(spv::OpNot, type_uint_,
+                                                         rt_keep_mask[i]);
+          }
+
+          // Blend and mask each sample.
+          for (uint32_t i = 0; i < 4; ++i) {
+            SpirvBuilder::IfBuilder if_sample_covered(
+                fsi_samples_covered[i], spv::SelectionControlDontFlattenMask,
+                *builder_);
+
+            spv::Id rt_sample_address =
+                FSI_AddSampleOffset(rt_sample_0_address, i, rt_is_64bpp);
+            id_vector_temp_.clear();
+            // First SSBO structure element.
+            id_vector_temp_.push_back(const_int_0_);
+            id_vector_temp_.push_back(rt_sample_address);
+            spv::Id rt_access_chain_0 = builder_->createAccessChain(
+                features_.spirv_version >= spv::Spv_1_3
+                    ? spv::StorageClassStorageBuffer
+                    : spv::StorageClassUniform,
+                buffer_edram_, id_vector_temp_);
+            id_vector_temp_.back() = builder_->createBinOp(
+                spv::OpIAdd, type_int_, rt_sample_address, fsi_const_int_1);
+            spv::Id rt_access_chain_1 = builder_->createAccessChain(
+                features_.spirv_version >= spv::Spv_1_3
+                    ? spv::StorageClassStorageBuffer
+                    : spv::StorageClassUniform,
+                buffer_edram_, id_vector_temp_);
+
+            // Load the destination color.
+            std::array<spv::Id, 2> dest_packed;
+            dest_packed[0] =
+                builder_->createLoad(rt_access_chain_0, spv::NoPrecision);
+            {
+              SpirvBuilder::IfBuilder if_64bpp(
+                  rt_is_64bpp, spv::SelectionControlDontFlattenMask, *builder_);
+              spv::Id dest_packed_64bpp_high =
+                  builder_->createLoad(rt_access_chain_1, spv::NoPrecision);
+              if_64bpp.makeEndIf();
+              dest_packed[1] = if_64bpp.createMergePhi(dest_packed_64bpp_high,
+                                                       const_uint_0_);
+            }
+            std::array<spv::Id, 4> dest_unpacked =
+                FSI_UnpackColor(dest_packed, rt_format_with_flags);
+            id_vector_temp_.clear();
+            id_vector_temp_.push_back(dest_unpacked[0]);
+            id_vector_temp_.push_back(dest_unpacked[1]);
+            id_vector_temp_.push_back(dest_unpacked[2]);
+            spv::Id dest_color = builder_->createCompositeConstruct(
+                type_float3_, id_vector_temp_);
+
+            // Blend the components.
+            spv::Id result_color = FSI_BlendColorOrAlphaWithUnclampedResult(
+                rt_color_is_fixed_point, rt_clamp_color_min, rt_clamp_color_max,
+                source_color_clamped, source_alpha_clamped, dest_color,
+                dest_unpacked[3], blend_constant_color_clamped,
+                blend_constant_alpha_clamped, rt_color_equation,
+                rt_color_source_factor, rt_color_dest_factor);
+            spv::Id result_alpha = FSI_BlendColorOrAlphaWithUnclampedResult(
+                rt_alpha_is_fixed_point, rt_clamp_alpha_min, rt_clamp_alpha_max,
+                spv::NoResult, source_alpha_clamped, spv::NoResult,
+                dest_unpacked[3], spv::NoResult, blend_constant_alpha_clamped,
+                rt_alpha_equation, rt_alpha_source_factor,
+                rt_alpha_dest_factor);
+
+            // Pack and store the result.
+            // Bypass the `getNumTypeConstituents(typeId) ==
+            // (int)constituents.size()` assertion in createCompositeConstruct,
+            // OpCompositeConstruct can construct vectors not only from scalars,
+            // but also from other vectors.
+            spv::Id result_float4;
+            {
+              std::unique_ptr<spv::Instruction> result_composite_construct_op =
+                  std::make_unique<spv::Instruction>(builder_->getUniqueId(),
+                                                     type_float4_,
+                                                     spv::OpCompositeConstruct);
+              result_composite_construct_op->addIdOperand(result_color);
+              result_composite_construct_op->addIdOperand(result_alpha);
+              result_float4 = result_composite_construct_op->getResultId();
+              builder_->getBuildPoint()->addInstruction(
+                  std::move(result_composite_construct_op));
+            }
+            std::array<spv::Id, 2> result_packed =
+                FSI_ClampAndPackColor(result_float4, rt_format_with_flags);
+            builder_->createStore(
+                builder_->createBinOp(
+                    spv::OpBitwiseOr, type_uint_,
+                    builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                          dest_packed[0], rt_keep_mask[0]),
+                    builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                          result_packed[0],
+                                          rt_replace_mask[0])),
+                rt_access_chain_0);
+            SpirvBuilder::IfBuilder if_64bpp(
+                rt_is_64bpp, spv::SelectionControlDontFlattenMask, *builder_);
+            {
+              builder_->createStore(
+                  builder_->createBinOp(
+                      spv::OpBitwiseOr, type_uint_,
+                      builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                            dest_packed[1], rt_keep_mask[1]),
+                      builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                            result_packed[1],
+                                            rt_replace_mask[1])),
+                  rt_access_chain_1);
+            }
+            if_64bpp.makeEndIf();
+
+            if_sample_covered.makeEndIf();
+          }
+        }
+        if_rt_blend_enabled.makeBeginElse();
+        {
+          // Non-blending paths.
+
+          // Pack the new color for all samples.
+          std::array<spv::Id, 2> color_packed =
+              FSI_ClampAndPackColor(color, rt_format_with_flags);
+
+          // Check if need to load the original contents.
+          spv::Id rt_keep_mask_not_empty = builder_->createBinOp(
+              spv::OpLogicalOr, type_bool_,
+              builder_->createBinOp(spv::OpINotEqual, type_bool_,
+                                    rt_keep_mask[0], const_uint_0_),
+              builder_->createBinOp(spv::OpINotEqual, type_bool_,
+                                    rt_keep_mask[1], const_uint_0_));
+
+          SpirvBuilder::IfBuilder if_rt_keep_mask_not_empty(
+              rt_keep_mask_not_empty, spv::SelectionControlDontFlattenMask,
+              *builder_);
+          {
+            // Loading and masking path.
+            std::array<spv::Id, 2> color_packed_masked;
+            for (uint32_t i = 0; i < 2; ++i) {
+              color_packed_masked[i] = builder_->createBinOp(
+                  spv::OpBitwiseAnd, type_uint_, color_packed[i],
+                  builder_->createUnaryOp(spv::OpNot, type_uint_,
+                                          rt_keep_mask[i]));
+            }
+            for (uint32_t i = 0; i < 4; ++i) {
+              SpirvBuilder::IfBuilder if_sample_covered(
+                  fsi_samples_covered[i], spv::SelectionControlDontFlattenMask,
+                  *builder_);
+              spv::Id rt_sample_address =
+                  FSI_AddSampleOffset(rt_sample_0_address, i, rt_is_64bpp);
+              id_vector_temp_.clear();
+              // First SSBO structure element.
+              id_vector_temp_.push_back(const_int_0_);
+              id_vector_temp_.push_back(rt_sample_address);
+              spv::Id rt_access_chain_0 = builder_->createAccessChain(
+                  features_.spirv_version >= spv::Spv_1_3
+                      ? spv::StorageClassStorageBuffer
+                      : spv::StorageClassUniform,
+                  buffer_edram_, id_vector_temp_);
+              builder_->createStore(
+                  builder_->createBinOp(
+                      spv::OpBitwiseOr, type_uint_,
+                      builder_->createBinOp(
+                          spv::OpBitwiseAnd, type_uint_,
+                          builder_->createLoad(rt_access_chain_0,
+                                               spv::NoPrecision),
+                          rt_keep_mask[0]),
+                      color_packed_masked[0]),
+                  rt_access_chain_0);
+              SpirvBuilder::IfBuilder if_64bpp(
+                  rt_is_64bpp, spv::SelectionControlDontFlattenMask, *builder_);
+              {
+                id_vector_temp_.back() = builder_->createBinOp(
+                    spv::OpIAdd, type_int_, rt_sample_address, fsi_const_int_1);
+                spv::Id rt_access_chain_1 = builder_->createAccessChain(
+                    features_.spirv_version >= spv::Spv_1_3
+                        ? spv::StorageClassStorageBuffer
+                        : spv::StorageClassUniform,
+                    buffer_edram_, id_vector_temp_);
+                builder_->createStore(
+                    builder_->createBinOp(
+                        spv::OpBitwiseOr, type_uint_,
+                        builder_->createBinOp(
+                            spv::OpBitwiseAnd, type_uint_,
+                            builder_->createLoad(rt_access_chain_1,
+                                                 spv::NoPrecision),
+                            rt_keep_mask[1]),
+                        color_packed_masked[1]),
+                    rt_access_chain_1);
+              }
+              if_64bpp.makeEndIf();
+              if_sample_covered.makeEndIf();
+            }
+          }
+          if_rt_keep_mask_not_empty.makeBeginElse();
+          {
+            // Fully overwriting path.
+            for (uint32_t i = 0; i < 4; ++i) {
+              SpirvBuilder::IfBuilder if_sample_covered(
+                  fsi_samples_covered[i], spv::SelectionControlDontFlattenMask,
+                  *builder_);
+              spv::Id rt_sample_address =
+                  FSI_AddSampleOffset(rt_sample_0_address, i, rt_is_64bpp);
+              id_vector_temp_.clear();
+              // First SSBO structure element.
+              id_vector_temp_.push_back(const_int_0_);
+              id_vector_temp_.push_back(rt_sample_address);
+              builder_->createStore(color_packed[0],
+                                    builder_->createAccessChain(
+                                        features_.spirv_version >= spv::Spv_1_3
+                                            ? spv::StorageClassStorageBuffer
+                                            : spv::StorageClassUniform,
+                                        buffer_edram_, id_vector_temp_));
+              SpirvBuilder::IfBuilder if_64bpp(
+                  rt_is_64bpp, spv::SelectionControlDontFlattenMask, *builder_);
+              {
+                id_vector_temp_.back() = builder_->createBinOp(
+                    spv::OpIAdd, type_int_, id_vector_temp_.back(),
+                    fsi_const_int_1);
+                builder_->createStore(
+                    color_packed[1], builder_->createAccessChain(
+                                         features_.spirv_version >= spv::Spv_1_3
+                                             ? spv::StorageClassStorageBuffer
+                                             : spv::StorageClassUniform,
+                                         buffer_edram_, id_vector_temp_));
+              }
+              if_64bpp.makeEndIf();
+              if_sample_covered.makeEndIf();
+            }
+          }
+          if_rt_keep_mask_not_empty.makeEndIf();
+        }
+        if_rt_blend_enabled.makeEndIf();
+
+        if_rt_write_mask_not_empty.makeEndIf();
+        if_fsi_color_written.makeEndIf();
+      } else {
+        // Convert to gamma space - this is incorrect, since it must be done
+        // after blending on the Xbox 360, but this is just one of many blending
+        // issues in the host render target path.
+        // TODO(Triang3l): Gamma as unorm8 check.
+        uint_vector_temp_.clear();
+        uint_vector_temp_.push_back(0);
+        uint_vector_temp_.push_back(1);
+        uint_vector_temp_.push_back(2);
+        spv::Id color_rgb = builder_->createRvalueSwizzle(
+            spv::NoPrecision, type_float3_, color, uint_vector_temp_);
+        spv::Id is_gamma = builder_->createBinOp(
+            spv::OpINotEqual, type_bool_,
+            builder_->createBinOp(
+                spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+                builder_->makeUintConstant(kSysFlag_ConvertColor0ToGamma
+                                           << color_target_index)),
+            const_uint_0_);
+        SpirvBuilder::IfBuilder if_gamma(
+            is_gamma, spv::SelectionControlDontFlattenMask, *builder_);
+        spv::Id color_rgb_gamma = SpirvShaderTranslator::LinearToPWLGamma(
+            builder_.get(), color_rgb, false, ext_inst_glsl_std_450_);
+        if_gamma.makeEndIf();
+        color_rgb = if_gamma.createMergePhi(color_rgb_gamma, color_rgb);
+        {
+          std::unique_ptr<spv::Instruction> color_rgba_shuffle_op =
+              std::make_unique<spv::Instruction>(
+                  builder_->getUniqueId(), type_float4_, spv::OpVectorShuffle);
+          color_rgba_shuffle_op->addIdOperand(color_rgb);
+          color_rgba_shuffle_op->addIdOperand(color);
+          color_rgba_shuffle_op->addImmediateOperand(0);
+          color_rgba_shuffle_op->addImmediateOperand(1);
+          color_rgba_shuffle_op->addImmediateOperand(2);
+          color_rgba_shuffle_op->addImmediateOperand(3 + 3);
+          color = color_rgba_shuffle_op->getResultId();
+          builder_->getBuildPoint()->addInstruction(
+              std::move(color_rgba_shuffle_op));
+        }
+
+        builder_->createStore(color, color_variable);
+      }
+    }
+  }
+
+  if (!edram_fragment_shader_interlock_) {
+    // FBO path: Copy from Function-scoped variables to Output variables.
+    // This is done at the end after alpha test/coverage so we can read the
+    // color values during those operations.
+    Modification shader_modification = GetSpirvShaderModification();
+    xenos::BlendFactor rt0_rgb_premult_factor =
+        shader_modification.pixel.rt0_blend_rgb_factor_for_premult;
+    xenos::BlendFactor rt0_a_premult_factor =
+        shader_modification.pixel.rt0_blend_a_factor_for_premult;
+
+    uint32_t color_targets_to_copy = current_shader().writes_color_targets();
+    uint32_t color_target_index;
+    while (xe::bit_scan_forward(color_targets_to_copy, &color_target_index)) {
+      color_targets_to_copy &= ~(UINT32_C(1) << color_target_index);
+      spv::Id var_color = output_or_var_fragment_data_[color_target_index];
+      spv::Id out_color = output_fragment_data_[color_target_index];
+      if (var_color != spv::NoResult && out_color != spv::NoResult) {
+        spv::Id color = builder_->createLoad(var_color, spv::NoPrecision);
+
+        // For RT0, apply pre-multiply by source blend factor if needed for
+        // MIN/MAX blend emulation (since Vulkan/D3D12 ignores blend factors
+        // for MIN/MAX but Xbox 360 applies them).
+        if (color_target_index == 0 &&
+            (rt0_rgb_premult_factor != xenos::BlendFactor::kOne ||
+             rt0_a_premult_factor != xenos::BlendFactor::kOne)) {
+          // Helper to extract RGB (xyz) from a float4.
+          auto extract_rgb = [&](spv::Id vec4) -> spv::Id {
+            uint_vector_temp_.clear();
+            uint_vector_temp_.push_back(0);
+            uint_vector_temp_.push_back(1);
+            uint_vector_temp_.push_back(2);
+            return builder_->createRvalueSwizzle(spv::NoPrecision, type_float3_,
+                                                 vec4, uint_vector_temp_);
+          };
+
+          // Get blend factor values.
+          auto get_factor_value = [&](xenos::BlendFactor factor,
+                                      bool for_alpha) -> spv::Id {
+            spv::Id src_color = color;
+            switch (factor) {
+              case xenos::BlendFactor::kZero:
+                return for_alpha ? const_float_0_ : const_float3_0_;
+              case xenos::BlendFactor::kOne:
+                return for_alpha ? const_float_1_ : const_float3_1_;
+              case xenos::BlendFactor::kSrcColor:
+                return for_alpha ? builder_->createCompositeExtract(
+                                       src_color, type_float_, 3)
+                                 : extract_rgb(src_color);
+              case xenos::BlendFactor::kOneMinusSrcColor: {
+                spv::Id src = for_alpha ? builder_->createCompositeExtract(
+                                              src_color, type_float_, 3)
+                                        : extract_rgb(src_color);
+                spv::Id one = for_alpha ? const_float_1_ : const_float3_1_;
+                return builder_->createBinOp(
+                    spv::OpFSub, for_alpha ? type_float_ : type_float3_, one,
+                    src);
+              }
+              case xenos::BlendFactor::kSrcAlpha: {
+                spv::Id alpha =
+                    builder_->createCompositeExtract(src_color, type_float_, 3);
+                if (for_alpha) {
+                  return alpha;
+                }
+                return builder_->smearScalar(spv::NoPrecision, alpha,
+                                             type_float3_);
+              }
+              case xenos::BlendFactor::kOneMinusSrcAlpha: {
+                spv::Id alpha =
+                    builder_->createCompositeExtract(src_color, type_float_, 3);
+                spv::Id one_minus_alpha = builder_->createBinOp(
+                    spv::OpFSub, type_float_, const_float_1_, alpha);
+                if (for_alpha) {
+                  return one_minus_alpha;
+                }
+                return builder_->smearScalar(spv::NoPrecision, one_minus_alpha,
+                                             type_float3_);
+              }
+              case xenos::BlendFactor::kConstantColor:
+              case xenos::BlendFactor::kConstantAlpha: {
+                // Load blend constant from system constants.
+                id_vector_temp_.clear();
+                id_vector_temp_.push_back(builder_->makeIntConstant(
+                    kSystemConstantEdramBlendConstant));
+                spv::Id blend_constant = builder_->createLoad(
+                    builder_->createAccessChain(spv::StorageClassUniform,
+                                                uniform_system_constants_,
+                                                id_vector_temp_),
+                    spv::NoPrecision);
+                if (factor == xenos::BlendFactor::kConstantAlpha) {
+                  spv::Id alpha = builder_->createCompositeExtract(
+                      blend_constant, type_float_, 3);
+                  if (for_alpha) {
+                    return alpha;
+                  }
+                  return builder_->smearScalar(spv::NoPrecision, alpha,
+                                               type_float3_);
+                }
+                if (for_alpha) {
+                  return builder_->createCompositeExtract(blend_constant,
+                                                          type_float_, 3);
+                }
+                return extract_rgb(blend_constant);
+              }
+              case xenos::BlendFactor::kOneMinusConstantColor:
+              case xenos::BlendFactor::kOneMinusConstantAlpha: {
+                id_vector_temp_.clear();
+                id_vector_temp_.push_back(builder_->makeIntConstant(
+                    kSystemConstantEdramBlendConstant));
+                spv::Id blend_constant = builder_->createLoad(
+                    builder_->createAccessChain(spv::StorageClassUniform,
+                                                uniform_system_constants_,
+                                                id_vector_temp_),
+                    spv::NoPrecision);
+                spv::Id constant_value;
+                if (factor == xenos::BlendFactor::kOneMinusConstantAlpha) {
+                  spv::Id alpha = builder_->createCompositeExtract(
+                      blend_constant, type_float_, 3);
+                  if (for_alpha) {
+                    constant_value = alpha;
+                  } else {
+                    constant_value = builder_->smearScalar(spv::NoPrecision,
+                                                           alpha, type_float3_);
+                  }
+                } else {
+                  if (for_alpha) {
+                    constant_value = builder_->createCompositeExtract(
+                        blend_constant, type_float_, 3);
+                  } else {
+                    constant_value = extract_rgb(blend_constant);
+                  }
+                }
+                spv::Id one = for_alpha ? const_float_1_ : const_float3_1_;
+                return builder_->createBinOp(
+                    spv::OpFSub, for_alpha ? type_float_ : type_float3_, one,
+                    constant_value);
+              }
+              default:
+                // Unsupported factors - return 1 (no multiply).
+                return for_alpha ? const_float_1_ : const_float3_1_;
+            }
+          };
+
+          // Apply RGB pre-multiply.
+          if (rt0_rgb_premult_factor != xenos::BlendFactor::kOne) {
+            spv::Id rgb_factor =
+                get_factor_value(rt0_rgb_premult_factor, false);
+            spv::Id rgb = extract_rgb(color);
+            rgb = builder_->createBinOp(spv::OpFMul, type_float3_, rgb,
+                                        rgb_factor);
+            // Reconstruct float4 with new RGB and original alpha.
+            spv::Id alpha =
+                builder_->createCompositeExtract(color, type_float_, 3);
+            id_vector_temp_.clear();
+            id_vector_temp_.push_back(
+                builder_->createCompositeExtract(rgb, type_float_, 0));
+            id_vector_temp_.push_back(
+                builder_->createCompositeExtract(rgb, type_float_, 1));
+            id_vector_temp_.push_back(
+                builder_->createCompositeExtract(rgb, type_float_, 2));
+            id_vector_temp_.push_back(alpha);
+            color = builder_->createCompositeConstruct(type_float4_,
+                                                       id_vector_temp_);
+          }
+
+          // Apply alpha pre-multiply.
+          if (rt0_a_premult_factor != xenos::BlendFactor::kOne) {
+            spv::Id a_factor = get_factor_value(rt0_a_premult_factor, true);
+            spv::Id alpha =
+                builder_->createCompositeExtract(color, type_float_, 3);
+            alpha = builder_->createBinOp(spv::OpFMul, type_float_, alpha,
+                                          a_factor);
+            // Replace alpha in color (extract RGB, reconstruct with new alpha).
+            id_vector_temp_.clear();
+            id_vector_temp_.push_back(
+                builder_->createCompositeExtract(color, type_float_, 0));
+            id_vector_temp_.push_back(
+                builder_->createCompositeExtract(color, type_float_, 1));
+            id_vector_temp_.push_back(
+                builder_->createCompositeExtract(color, type_float_, 2));
+            id_vector_temp_.push_back(alpha);
+            color = builder_->createCompositeConstruct(type_float4_,
+                                                       id_vector_temp_);
+          }
+        }
+
+        builder_->createStore(color, out_color);
+      }
+    }
+  }
+
+  // Copies the staged depth to the FBO gl_FragDepth output.
+  // No-op for FSI and when no host depth output was declared.
+  CompleteFragmentShader_DSV_DepthTo24Bit();
+
+  if (edram_fragment_shader_interlock_) {
+    if (block_fsi_if_after_depth_stencil_merge) {
+      builder_->createBranch(block_fsi_if_after_depth_stencil_merge);
+      builder_->setBuildPoint(block_fsi_if_after_depth_stencil_merge);
+    }
+
+    if (block_fsi_if_after_kill_merge) {
+      builder_->createBranch(block_fsi_if_after_kill_merge);
+      builder_->setBuildPoint(block_fsi_if_after_kill_merge);
+    }
+
+    if (FSI_IsDepthStencilEarly()) {
+      builder_->createBranch(main_fsi_early_depth_stencil_execute_quad_merge_);
+      builder_->setBuildPoint(main_fsi_early_depth_stencil_execute_quad_merge_);
+    }
+
+    builder_->createNoResultOp(spv::OpEndInvocationInterlockEXT);
+  }
+}
+
+void SpirvShaderTranslator::CompleteFragmentShader_DSV_DepthTo24Bit() {
+  // FSI manages its own depth via the EDRAM buffer - this hook is FBO-only.
+  // Likewise, if no Output FragDepth was declared, there is nothing to write.
+  if (edram_fragment_shader_interlock_ ||
+      output_fragment_depth_ == spv::NoResult) {
+    return;
+  }
+  bool shader_writes_depth = current_shader().writes_depth();
+  bool is_float24 = DSV_IsWritingFloat24Depth();
+  bool apply_polygon_offset =
+      DSV_IsApplyingPolygonOffset() && !shader_writes_depth;
+  assert_true(shader_writes_depth || is_float24 || apply_polygon_offset);
+
+  // Source depth from guest oDepth, or from raster depth for float24 conversion
+  // and the host RT decal path.
+  spv::Id depth_value;
+  if (shader_writes_depth) {
+    depth_value =
+        builder_->createLoad(output_or_var_fragment_depth_, spv::NoPrecision);
+  } else {
+    spv::Id host_depth;
+    if (apply_polygon_offset) {
+      assert_true(input_front_facing_ != spv::NoResult);
+      assert_true(main_fbo_depth_unbiased_ != spv::NoResult);
+      assert_true(main_fbo_depth_derivatives_[0] != spv::NoResult);
+      assert_true(main_fbo_depth_derivatives_[1] != spv::NoResult);
+      auto load_system_constant_float = [&](SystemConstantIndex index) {
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(builder_->makeIntConstant(index));
+        return builder_->createLoad(
+            builder_->createAccessChain(spv::StorageClassUniform,
+                                        uniform_system_constants_,
+                                        id_vector_temp_),
+            spv::NoPrecision);
+      };
+      spv::Id depth_dx = builder_->createUnaryBuiltinCall(
+          type_float_, ext_inst_glsl_std_450_, GLSLstd450FAbs,
+          main_fbo_depth_derivatives_[0]);
+      spv::Id depth_dy = builder_->createUnaryBuiltinCall(
+          type_float_, ext_inst_glsl_std_450_, GLSLstd450FAbs,
+          main_fbo_depth_derivatives_[1]);
+      spv::Id depth_max_slope =
+          builder_->createBinBuiltinCall(type_float_, ext_inst_glsl_std_450_,
+                                         GLSLstd450FMax, depth_dx, depth_dy);
+      spv::Id front_facing =
+          builder_->createLoad(input_front_facing_, spv::NoPrecision);
+      spv::Id poly_offset_scale = builder_->createTriOp(
+          spv::OpSelect, type_float_, front_facing,
+          load_system_constant_float(kSystemConstantEdramPolyOffsetFrontScale),
+          load_system_constant_float(kSystemConstantEdramPolyOffsetBackScale));
+      spv::Id poly_offset_offset = builder_->createTriOp(
+          spv::OpSelect, type_float_, front_facing,
+          load_system_constant_float(kSystemConstantEdramPolyOffsetFrontOffset),
+          load_system_constant_float(kSystemConstantEdramPolyOffsetBackOffset));
+      spv::Id poly_offset = builder_->createNoContractionBinOp(
+          spv::OpFAdd, type_float_,
+          builder_->createNoContractionBinOp(
+              spv::OpFMul, type_float_, depth_max_slope, poly_offset_scale),
+          poly_offset_offset);
+      host_depth = builder_->createNoContractionBinOp(
+          spv::OpFAdd, type_float_, main_fbo_depth_unbiased_, poly_offset);
+    } else {
+      assert_true(input_fragment_coordinates_ != spv::NoResult);
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(builder_->makeIntConstant(2));
+      host_depth = builder_->createLoad(
+          builder_->createAccessChain(spv::StorageClassInput,
+                                      input_fragment_coordinates_,
+                                      id_vector_temp_),
+          spv::NoPrecision);
+    }
+    if (is_float24) {
+      depth_value = builder_->createBinOp(spv::OpFMul, type_float_, host_depth,
+                                          builder_->makeFloatConstant(2.0f));
+      depth_value = builder_->createTriBuiltinCall(
+          type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp, depth_value,
+          const_float_0_, const_float_1_);
+    } else {
+      depth_value = host_depth;
+    }
+  }
+
+  if (!is_float24) {
+    if (!shader_writes_depth) {
+      builder_->createStore(depth_value, output_fragment_depth_);
+      return;
+    }
+    // Legacy path: shader writes oDepth, but the modification is not in float24
+    // mode (the host buffer may still be float24 if depth_float24_convert_in_
+    // pixel_shader is off - check dynamically via the system flag).
+    spv::Id depth_float24_flag = builder_->createBinOp(
+        spv::OpINotEqual, type_bool_,
+        builder_->createBinOp(
+            spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+            builder_->makeUintConstant(kSysFlag_DepthFloat24)),
+        const_uint_0_);
+    spv::Id depth_scaled =
+        builder_->createBinOp(spv::OpFMul, type_float_, depth_value,
+                              builder_->makeFloatConstant(0.5f));
+    spv::Id depth_remapped =
+        builder_->createTriOp(spv::OpSelect, type_float_, depth_float24_flag,
+                              depth_scaled, depth_value);
+    builder_->createStore(depth_remapped, output_fragment_depth_);
+    return;
+  }
+
+  // Float24 mode: statically known float24 host buffer; perform the conversion.
+  Modification::DepthStencilMode mode =
+      GetSpirvShaderModification().pixel.depth_stencil_mode;
+  if (mode == Modification::DepthStencilMode::kFloat24Truncating ||
+      mode == Modification::DepthStencilMode::kFloat24TruncatingPolygonOffset) {
+    // Mantissa bit-truncation, then guest 0...1 -> host 0...0.5.
+    spv::Id depth_uint =
+        builder_->createUnaryOp(spv::OpBitcast, type_uint_, depth_value);
+    // Representable as float24 (exponent >= -34): bit pattern >= 0x2E800000.
+    spv::Id representable =
+        builder_->createBinOp(spv::OpUGreaterThanEqual, type_bool_, depth_uint,
+                              builder_->makeUintConstant(0x2E800000));
+    SpirvBuilder::IfBuilder representable_if(
+        representable, spv::SelectionControlDontFlattenMask, *builder_);
+    {
+      // Biased exponent: 113+ at exp -14+; 93 at exp -34.
+      spv::Id exponent = builder_->createTriOp(
+          spv::OpBitFieldUExtract, type_uint_, depth_uint,
+          builder_->makeUintConstant(23), builder_->makeUintConstant(8));
+      // trunc_bits = max(116 - exponent, 3), in signed - drops 3 mantissa bits
+      // at exp -14+ and 23 at exp -34. Must be signed: exponent > 116 (i.e.
+      // values larger than ~2^-11) makes 116 - exponent negative; an unsigned
+      // underflow would feed OpBitFieldInsert a Count > 32 (undefined).
+      spv::Id trunc_bits_signed = builder_->createBinOp(
+          spv::OpISub, type_int_, builder_->makeIntConstant(116),
+          builder_->createUnaryOp(spv::OpBitcast, type_int_, exponent));
+      trunc_bits_signed = builder_->createBinBuiltinCall(
+          type_int_, ext_inst_glsl_std_450_, GLSLstd450SMax, trunc_bits_signed,
+          builder_->makeIntConstant(3));
+      spv::Id trunc_bits = builder_->createUnaryOp(spv::OpBitcast, type_uint_,
+                                                   trunc_bits_signed);
+      spv::Id truncated_uint =
+          builder_->createQuadOp(spv::OpBitFieldInsert, type_uint_, depth_uint,
+                                 builder_->makeUintConstant(0),
+                                 builder_->makeUintConstant(0), trunc_bits);
+      spv::Id truncated_f32 =
+          builder_->createUnaryOp(spv::OpBitcast, type_float_, truncated_uint);
+      spv::Id remapped =
+          builder_->createBinOp(spv::OpFMul, type_float_, truncated_f32,
+                                builder_->makeFloatConstant(0.5f));
+      builder_->createStore(remapped, output_fragment_depth_);
+    }
+    representable_if.makeBeginElse();
+    {
+      // Not representable - zero.
+      builder_->createStore(const_float_0_, output_fragment_depth_);
+    }
+    representable_if.makeEndIf();
+  } else {
+    // kFloat24Rounding: round-trip through 20e4 (round to nearest even), with
+    // the 0...0.5 host remap baked in via remap_to_0_to_0_5 on Depth20e4To32.
+    spv::Id f24_uint = PreClampedDepthTo20e4(*builder_, depth_value, true,
+                                             false, ext_inst_glsl_std_450_);
+    spv::Id depth_f32 = Depth20e4To32(*builder_, f24_uint, 0, true, false,
+                                      ext_inst_glsl_std_450_);
+    builder_->createStore(depth_f32, output_fragment_depth_);
+  }
+}
+
+spv::Id SpirvShaderTranslator::LoadMsaaSamplesFromFlags() {
+  return builder_->createTriOp(
+      spv::OpBitFieldUExtract, type_uint_, main_system_constant_flags_,
+      builder_->makeUintConstant(kSysFlag_MsaaSamples_Shift),
+      builder_->makeUintConstant(2));
+}
+
+void SpirvShaderTranslator::FSI_LoadSampleMask(spv::Id msaa_samples) {
+  // On the Xbox 360, 2x MSAA doubles the storage height, 4x MSAA doubles the
+  // storage width.
+  // Vulkan standard 2x samples are bottom, top.
+  // Vulkan standard 4x samples are TL, TR, BL, BR.
+  // Remap to T, B for 2x, and to TL, BL, TR, BR for 4x.
+  // 2x corresponds to 1, 0 with native 2x MSAA on Vulkan, 0, 3 with 2x as 4x.
+  // 4x corresponds to 0, 2, 1, 3 on Vulkan.
+
+  spv::Id const_uint_1 = builder_->makeUintConstant(1);
+  spv::Id const_uint_2 = builder_->makeUintConstant(2);
+
+  assert_true(input_sample_mask_ != spv::NoResult);
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(const_int_0_);
+  spv::Id input_sample_mask_value = builder_->createUnaryOp(
+      spv::OpBitcast, type_uint_,
+      builder_->createLoad(
+          builder_->createAccessChain(spv::StorageClassInput,
+                                      input_sample_mask_, id_vector_temp_),
+          spv::NoPrecision));
+
+  spv::Block& block_msaa_head = *builder_->getBuildPoint();
+  spv::Block& block_msaa_1x = builder_->makeNewBlock();
+  spv::Block& block_msaa_2x = builder_->makeNewBlock();
+  spv::Block& block_msaa_4x = builder_->makeNewBlock();
+  spv::Block& block_msaa_merge = builder_->makeNewBlock();
+  builder_->createSelectionMerge(&block_msaa_merge,
+                                 spv::SelectionControlDontFlattenMask);
+  {
+    std::unique_ptr<spv::Instruction> msaa_switch_op =
+        std::make_unique<spv::Instruction>(spv::OpSwitch);
+    msaa_switch_op->addIdOperand(msaa_samples);
+    // Make 1x the default.
+    msaa_switch_op->addIdOperand(block_msaa_1x.getId());
+    msaa_switch_op->addImmediateOperand(int32_t(xenos::MsaaSamples::k2X));
+    msaa_switch_op->addIdOperand(block_msaa_2x.getId());
+    msaa_switch_op->addImmediateOperand(int32_t(xenos::MsaaSamples::k4X));
+    msaa_switch_op->addIdOperand(block_msaa_4x.getId());
+    builder_->getBuildPoint()->addInstruction(std::move(msaa_switch_op));
+  }
+  block_msaa_1x.addPredecessor(&block_msaa_head);
+  block_msaa_2x.addPredecessor(&block_msaa_head);
+  block_msaa_4x.addPredecessor(&block_msaa_head);
+
+  // 1x MSAA - pass input_sample_mask_value through.
+  builder_->setBuildPoint(&block_msaa_1x);
+  builder_->createBranch(&block_msaa_merge);
+
+  // 2x MSAA.
+  builder_->setBuildPoint(&block_msaa_2x);
+  spv::Id sample_mask_2x;
+  if (native_2x_msaa_no_attachments_) {
+    // 1 and 0 to 0 and 1.
+    sample_mask_2x = builder_->createBinOp(
+        spv::OpShiftRightLogical, type_uint_,
+        builder_->createUnaryOp(spv::OpBitReverse, type_uint_,
+                                input_sample_mask_value),
+        builder_->makeUintConstant(32 - 2));
+  } else {
+    // 0 and 3 to 0 and 1 - guest sample 1 comes from host sample 3
+    sample_mask_2x = builder_->createQuadOp(
+        spv::OpBitFieldInsert, type_uint_, input_sample_mask_value,
+        builder_->createTriOp(spv::OpBitFieldUExtract, type_uint_,
+                              input_sample_mask_value,
+                              builder_->makeUintConstant(3), const_uint_1),
+        const_uint_1, builder_->makeUintConstant(32 - 1));
+  }
+  builder_->createBranch(&block_msaa_merge);
+
+  // 4x MSAA.
+  builder_->setBuildPoint(&block_msaa_4x);
+  // Flip samples in bits 0:1 by reversing the whole coverage mask and inserting
+  // the reversing bits.
+  spv::Id sample_mask_4x = builder_->createQuadOp(
+      spv::OpBitFieldInsert, type_uint_, input_sample_mask_value,
+      builder_->createBinOp(
+          spv::OpShiftRightLogical, type_uint_,
+          builder_->createUnaryOp(spv::OpBitReverse, type_uint_,
+                                  input_sample_mask_value),
+          builder_->makeUintConstant(32 - 1 - 2)),
+      const_uint_1, const_uint_2);
+  builder_->createBranch(&block_msaa_merge);
+
+  // Select the result depending on the MSAA sample count.
+  builder_->setBuildPoint(&block_msaa_merge);
+  id_vector_temp_.clear();
+  id_vector_temp_.reserve(2 * 3);
+  id_vector_temp_.push_back(input_sample_mask_value);
+  id_vector_temp_.push_back(block_msaa_1x.getId());
+  id_vector_temp_.push_back(sample_mask_2x);
+  id_vector_temp_.push_back(block_msaa_2x.getId());
+  id_vector_temp_.push_back(sample_mask_4x);
+  id_vector_temp_.push_back(block_msaa_4x.getId());
+  main_fsi_sample_mask_ =
+      builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+}
+
+void SpirvShaderTranslator::FSI_LoadEdramOffsets(spv::Id msaa_samples) {
+  // Convert the floating-point pixel coordinates to integer sample 0
+  // coordinates.
+  assert_true(input_fragment_coordinates_ != spv::NoResult);
+  spv::Id axes_have_two_msaa_samples[2];
+  spv::Id sample_coordinates[2];
+  spv::Id const_uint_1 = builder_->makeUintConstant(1);
+  for (uint32_t i = 0; i < 2; ++i) {
+    spv::Id axis_has_two_msaa_samples = builder_->createBinOp(
+        spv::OpUGreaterThanEqual, type_bool_, msaa_samples,
+        builder_->makeUintConstant(
+            uint32_t(i ? xenos::MsaaSamples::k2X : xenos::MsaaSamples::k4X)));
+    axes_have_two_msaa_samples[i] = axis_has_two_msaa_samples;
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(builder_->makeIntConstant(int32_t(i)));
+    sample_coordinates[i] = builder_->createBinOp(
+        spv::OpShiftLeftLogical, type_uint_,
+        builder_->createUnaryOp(
+            spv::OpConvertFToU, type_uint_,
+            builder_->createLoad(
+                builder_->createAccessChain(spv::StorageClassInput,
+                                            input_fragment_coordinates_,
+                                            id_vector_temp_),
+                spv::NoPrecision)),
+        builder_->createTriOp(spv::OpSelect, type_uint_,
+                              axis_has_two_msaa_samples, const_uint_1,
+                              const_uint_0_));
+  }
+
+  // Get 40 x 16 x resolution scale 32bpp half-tile or 40x16 64bpp tile index.
+  // Working with 40x16-sample portions for 64bpp and for swapping for depth -
+  // dividing by 40, not by 80.
+  // Apply resolution scaling to tile dimensions.
+  uint32_t tile_width =
+      xenos::kEdramTileWidthSamples * draw_resolution_scale_x_;
+  spv::Id const_tile_half_width = builder_->makeUintConstant(tile_width >> 1);
+  uint32_t tile_height =
+      xenos::kEdramTileHeightSamples * draw_resolution_scale_y_;
+  spv::Id const_tile_height = builder_->makeUintConstant(tile_height);
+  spv::Id tile_half_index[2], tile_half_sample_coordinates[2];
+  for (uint32_t i = 0; i < 2; ++i) {
+    spv::Id sample_x_or_y = sample_coordinates[i];
+    spv::Id tile_half_width_or_height =
+        i ? const_tile_height : const_tile_half_width;
+    tile_half_index[i] = builder_->createBinOp(
+        spv::OpUDiv, type_uint_, sample_x_or_y, tile_half_width_or_height);
+    tile_half_sample_coordinates[i] = builder_->createBinOp(
+        spv::OpUMod, type_uint_, sample_x_or_y, tile_half_width_or_height);
+  }
+
+  // Convert the Y sample 0 position within the half-tile or tile to the dword
+  // offset of the row within a 80x16 32bpp tile or a 40x16 64bpp half-tile.
+  spv::Id const_tile_width = builder_->makeUintConstant(tile_width);
+  spv::Id row_offset_in_tile_at_32bpp =
+      builder_->createBinOp(spv::OpIMul, type_uint_,
+                            tile_half_sample_coordinates[1], const_tile_width);
+
+  // Multiply the Y tile position by the surface tile pitch in dwords at 32bpp
+  // to get the address of the origin of the row of tiles within a 32bpp surface
+  // in dwords (later it needs to be multiplied by 2 for 64bpp).
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(builder_->makeIntConstant(
+      kSystemConstantEdram32bppTilePitchDwordsScaled));
+  spv::Id tile_row_offset_at_32bpp = builder_->createBinOp(
+      spv::OpIMul, type_uint_,
+      builder_->createLoad(builder_->createAccessChain(
+                               spv::StorageClassUniform,
+                               uniform_system_constants_, id_vector_temp_),
+                           spv::NoPrecision),
+      tile_half_index[1]);
+
+  uint32_t tile_size = tile_width * tile_height;
+  spv::Id const_tile_size = builder_->makeUintConstant(tile_size);
+
+  // Get the dword offset of the sample 0 in the first half-tile in the tile
+  // within a 32bpp surface.
+  spv::Id offset_in_first_tile_half_at_32bpp = builder_->createBinOp(
+      spv::OpIAdd, type_uint_,
+      builder_->createBinOp(
+          spv::OpIAdd, type_uint_, tile_row_offset_at_32bpp,
+          builder_->createBinOp(
+              spv::OpIAdd, type_uint_,
+              builder_->createBinOp(
+                  spv::OpIMul, type_uint_, const_tile_size,
+                  builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
+                                        tile_half_index[0], const_uint_1)),
+              row_offset_in_tile_at_32bpp)),
+      tile_half_sample_coordinates[0]);
+
+  // Get whether the sample is in the second half-tile in a 32bpp surface.
+  spv::Id is_second_tile_half = builder_->createBinOp(
+      spv::OpINotEqual, type_bool_,
+      builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, tile_half_index[0],
+                            const_uint_1),
+      const_uint_0_);
+
+  // Get the offset of the sample 0 within a depth / stencil surface, with
+  // samples 40...79 in the first half-tile, 0...39 in the second (flipped as
+  // opposed to color). Then add the EDRAM base for depth / stencil, and wrap
+  // addressing.
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(
+      builder_->makeIntConstant(kSystemConstantEdramDepthBaseDwordsScaled));
+  main_fsi_address_depth_ = builder_->createBinOp(
+      spv::OpUMod, type_uint_,
+      builder_->createBinOp(
+          spv::OpIAdd, type_uint_,
+          builder_->createLoad(builder_->createAccessChain(
+                                   spv::StorageClassUniform,
+                                   uniform_system_constants_, id_vector_temp_),
+                               spv::NoPrecision),
+          builder_->createBinOp(
+              spv::OpIAdd, type_uint_, offset_in_first_tile_half_at_32bpp,
+              builder_->createTriOp(spv::OpSelect, type_uint_,
+                                    is_second_tile_half, const_uint_0_,
+                                    const_tile_half_width))),
+      builder_->makeUintConstant(tile_size * xenos::kEdramTileCount));
+
+  if (current_shader().writes_color_targets()) {
+    // Get the offset of the sample 0 within a 32bpp surface, with samples
+    // 0...39 in the first half-tile, 40...79 in the second.
+    main_fsi_offset_32bpp_ = builder_->createBinOp(
+        spv::OpIAdd, type_uint_, offset_in_first_tile_half_at_32bpp,
+        builder_->createTriOp(spv::OpSelect, type_uint_, is_second_tile_half,
+                              const_tile_half_width, const_uint_0_));
+
+    // Get the offset of the sample 0 within a 64bpp surface.
+    main_fsi_offset_64bpp_ = builder_->createBinOp(
+        spv::OpIAdd, type_uint_,
+        builder_->createBinOp(
+            spv::OpIAdd, type_uint_,
+            builder_->createBinOp(spv::OpShiftLeftLogical, type_uint_,
+                                  tile_row_offset_at_32bpp, const_uint_1),
+            builder_->createBinOp(
+                spv::OpIAdd, type_uint_,
+                builder_->createBinOp(spv::OpIMul, type_uint_, const_tile_size,
+                                      tile_half_index[0]),
+                row_offset_in_tile_at_32bpp)),
+        builder_->createBinOp(spv::OpShiftLeftLogical, type_uint_,
+                              tile_half_sample_coordinates[0], const_uint_1));
+  }
+}
+
+spv::Id SpirvShaderTranslator::FSI_AddSampleOffset(spv::Id sample_0_address,
+                                                   uint32_t sample_index,
+                                                   spv::Id is_64bpp) {
+  if (!sample_index) {
+    return sample_0_address;
+  }
+  spv::Id sample_offset;
+  // Apply resolution scaling to tile width.
+  uint32_t tile_width =
+      xenos::kEdramTileWidthSamples * draw_resolution_scale_x_;
+  if (sample_index == 1) {
+    sample_offset = builder_->makeIntConstant(tile_width);
+  } else {
+    spv::Id sample_offset_32bpp = builder_->makeIntConstant(
+        tile_width * (sample_index & 1) + (sample_index >> 1));
+    if (is_64bpp != spv::NoResult) {
+      sample_offset = builder_->createTriOp(
+          spv::OpSelect, type_int_, is_64bpp,
+          builder_->makeIntConstant(tile_width * (sample_index & 1) +
+                                    2 * (sample_index >> 1)),
+          sample_offset_32bpp);
+    } else {
+      sample_offset = sample_offset_32bpp;
+    }
+  }
+  return builder_->createBinOp(spv::OpIAdd, type_int_, sample_0_address,
+                               sample_offset);
+}
+
+void SpirvShaderTranslator::FSI_AddPassedMSAASamplesToZPD() {
+  assert_true(edram_fragment_shader_interlock_);
+  assert_true(buffer_zpd_fsi_counter_ != spv::NoResult);
+
+  // UINT32_MAX means no ZPD segment is currently open for this draw.
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(
+      builder_->makeIntConstant(kSystemConstantZpdFsiCounterIndex));
+  spv::Id counter_index = builder_->createLoad(
+      builder_->createAccessChain(spv::StorageClassUniform,
+                                  uniform_system_constants_, id_vector_temp_),
+      spv::NoPrecision);
+  SpirvBuilder::IfBuilder if_counter_open(
+      builder_->createBinOp(spv::OpINotEqual, type_bool_, counter_index,
+                            builder_->makeUintConstant(UINT32_MAX)),
+      spv::SelectionControlDontFlattenMask, *builder_);
+
+  // Only bits 0:3 are surviving coverage. 4:7 are deferred depth/stencil and
+  // don't contribute to the counter.
+  spv::Id passed_sample_count = builder_->createUnaryOp(
+      spv::OpBitCount, type_uint_,
+      builder_->createBinOp(
+          spv::OpBitwiseAnd, type_uint_, main_fsi_sample_mask_,
+          builder_->makeUintConstant((uint32_t(1) << 4) - 1)));
+
+  SpirvBuilder::IfBuilder if_any_samples(
+      builder_->createBinOp(spv::OpINotEqual, type_bool_, passed_sample_count,
+                            const_uint_0_),
+      spv::SelectionControlDontFlattenMask, *builder_);
+
+  spv::StorageClass storage_class = features_.spirv_version >= spv::Spv_1_3
+                                        ? spv::StorageClassStorageBuffer
+                                        : spv::StorageClassUniform;
+  spv::Id const_scope_device =
+      builder_->makeUintConstant(static_cast<unsigned int>(spv::ScopeDevice));
+  spv::Id const_semantics_relaxed = const_uint_0_;
+
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(const_int_0_);
+  id_vector_temp_.push_back(
+      builder_->createUnaryOp(spv::OpBitcast, type_int_, counter_index));
+  spv::Id counter_ptr = builder_->createAccessChain(
+      storage_class, buffer_zpd_fsi_counter_, id_vector_temp_);
+
+  // Add the number of samples that survived final depth/stencil for this
+  // fragment to the active query slot, which is copied to the ZPD readback
+  // buffer when the query segment is closed.
+  builder_->createQuadOp(spv::OpAtomicIAdd, type_uint_, counter_ptr,
+                         const_scope_device, const_semantics_relaxed,
+                         passed_sample_count);
+
+  if_any_samples.makeEndIf();
+  if_counter_open.makeEndIf();
+}
+
+void SpirvShaderTranslator::FSI_DepthStencilTest(
+    spv::Id msaa_samples, bool sample_mask_potentially_narrowed_previouly) {
+  bool is_early = FSI_IsDepthStencilEarly();
+  bool implicit_early_z_write_allowed =
+      current_shader().implicit_early_z_write_allowed();
+  spv::Id const_uint_1 = builder_->makeUintConstant(1);
+  spv::Id const_uint_8 = builder_->makeUintConstant(8);
+
+  // Check if depth or stencil testing is needed.
+  spv::Id depth_stencil_enabled = builder_->createBinOp(
+      spv::OpINotEqual, type_bool_,
+      builder_->createBinOp(
+          spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+          builder_->makeUintConstant(kSysFlag_FSIDepthStencil)),
+      const_uint_0_);
+  SpirvBuilder::IfBuilder if_depth_stencil_enabled(
+      depth_stencil_enabled, spv::SelectionControlDontFlattenMask, *builder_);
+
+  spv::Id center_depth32_unbiased;
+  std::array<spv::Id, 2> depth_dxy;
+
+  // Guest oDepth replaces the depth value FSI tests. It's not the raster depth
+  // plane, so don't take FragCoord for it.
+  if (current_shader().writes_depth()) {
+    assert_false(is_early);
+    assert_true(output_or_var_fragment_depth_ != spv::NoResult);
+    center_depth32_unbiased =
+        builder_->createLoad(output_or_var_fragment_depth_, spv::NoPrecision);
+    depth_dxy[0] = const_float_0_;
+    depth_dxy[1] = const_float_0_;
+  } else {
+    // Load the depth in the center of the pixel and calculate the derivatives
+    // of the depth outside non-uniform control flow.
+    assert_true(input_fragment_coordinates_ != spv::NoResult);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(builder_->makeIntConstant(2));
+    center_depth32_unbiased =
+        builder_->createLoad(builder_->createAccessChain(
+                                 spv::StorageClassInput,
+                                 input_fragment_coordinates_, id_vector_temp_),
+                             spv::NoPrecision);
+    builder_->addCapability(spv::CapabilityDerivativeControl);
+    depth_dxy[0] = builder_->createUnaryOp(spv::OpDPdxCoarse, type_float_,
+                                           center_depth32_unbiased);
+    depth_dxy[1] = builder_->createUnaryOp(spv::OpDPdyCoarse, type_float_,
+                                           center_depth32_unbiased);
+  }
+
+  // Skip everything if potentially discarded all the samples previously in the
+  // shader.
+  spv::Block* block_any_sample_covered_head = nullptr;
+  spv::Block* block_any_sample_covered = nullptr;
+  spv::Block* block_any_sample_covered_merge = nullptr;
+  if (sample_mask_potentially_narrowed_previouly) {
+    spv::Id any_sample_covered = builder_->createBinOp(
+        spv::OpINotEqual, type_bool_, main_fsi_sample_mask_, const_uint_0_);
+    block_any_sample_covered_head = builder_->getBuildPoint();
+    block_any_sample_covered = &builder_->makeNewBlock();
+    block_any_sample_covered_merge = &builder_->makeNewBlock();
+    builder_->createSelectionMerge(block_any_sample_covered_merge,
+                                   spv::SelectionControlDontFlattenMask);
+    builder_->createConditionalBranch(any_sample_covered,
+                                      block_any_sample_covered,
+                                      block_any_sample_covered_merge);
+    builder_->setBuildPoint(block_any_sample_covered);
+  }
+
+  // Load values involved in depth and stencil testing.
+  spv::Id msaa_is_2x_4x = builder_->createBinOp(
+      spv::OpUGreaterThanEqual, type_bool_, msaa_samples,
+      builder_->makeUintConstant(uint32_t(xenos::MsaaSamples::k2X)));
+  spv::Id msaa_is_4x = builder_->createBinOp(
+      spv::OpUGreaterThanEqual, type_bool_, msaa_samples,
+      builder_->makeUintConstant(uint32_t(xenos::MsaaSamples::k4X)));
+  spv::Id depth_is_float24 = builder_->createBinOp(
+      spv::OpINotEqual, type_bool_,
+      builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                            main_system_constant_flags_,
+                            builder_->makeUintConstant(kSysFlag_DepthFloat24)),
+      const_uint_0_);
+  spv::Id depth_pass_if_less = builder_->createBinOp(
+      spv::OpINotEqual, type_bool_,
+      builder_->createBinOp(
+          spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+          builder_->makeUintConstant(kSysFlag_FSIDepthPassIfLess)),
+      const_uint_0_);
+  spv::Id depth_pass_if_equal = builder_->createBinOp(
+      spv::OpINotEqual, type_bool_,
+      builder_->createBinOp(
+          spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+          builder_->makeUintConstant(kSysFlag_FSIDepthPassIfEqual)),
+      const_uint_0_);
+  spv::Id depth_pass_if_greater = builder_->createBinOp(
+      spv::OpINotEqual, type_bool_,
+      builder_->createBinOp(
+          spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+          builder_->makeUintConstant(kSysFlag_FSIDepthPassIfGreater)),
+      const_uint_0_);
+  spv::Id depth_write = builder_->createBinOp(
+      spv::OpINotEqual, type_bool_,
+      builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                            main_system_constant_flags_,
+                            builder_->makeUintConstant(kSysFlag_FSIDepthWrite)),
+      const_uint_0_);
+  spv::Id stencil_enabled = builder_->createBinOp(
+      spv::OpINotEqual, type_bool_,
+      builder_->createBinOp(
+          spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+          builder_->makeUintConstant(kSysFlag_FSIStencilTest)),
+      const_uint_0_);
+  spv::Id early_write =
+      (is_early && implicit_early_z_write_allowed)
+          ? builder_->createBinOp(
+                spv::OpINotEqual, type_bool_,
+                builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                      main_system_constant_flags_,
+                                      builder_->makeUintConstant(
+                                          kSysFlag_FSIDepthStencilEarlyWrite)),
+                const_uint_0_)
+          : spv::NoResult;
+  spv::Id not_early_write =
+      (is_early && implicit_early_z_write_allowed)
+          ? builder_->createUnaryOp(spv::OpLogicalNot, type_bool_, early_write)
+          : spv::NoResult;
+  assert_true(input_front_facing_ != spv::NoResult);
+  spv::Id front_facing =
+      builder_->createLoad(input_front_facing_, spv::NoPrecision);
+  spv::Id poly_offset_scale, poly_offset_offset, stencil_parameters;
+  {
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(
+        builder_->makeIntConstant(kSystemConstantEdramPolyOffsetFrontScale));
+    spv::Id poly_offset_front_scale = builder_->createLoad(
+        builder_->createAccessChain(spv::StorageClassUniform,
+                                    uniform_system_constants_, id_vector_temp_),
+        spv::NoPrecision);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(
+        builder_->makeIntConstant(kSystemConstantEdramPolyOffsetBackScale));
+    spv::Id poly_offset_back_scale = builder_->createLoad(
+        builder_->createAccessChain(spv::StorageClassUniform,
+                                    uniform_system_constants_, id_vector_temp_),
+        spv::NoPrecision);
+    poly_offset_scale =
+        builder_->createTriOp(spv::OpSelect, type_float_, front_facing,
+                              poly_offset_front_scale, poly_offset_back_scale);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(
+        builder_->makeIntConstant(kSystemConstantEdramPolyOffsetFrontOffset));
+    spv::Id poly_offset_front_offset = builder_->createLoad(
+        builder_->createAccessChain(spv::StorageClassUniform,
+                                    uniform_system_constants_, id_vector_temp_),
+        spv::NoPrecision);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(
+        builder_->makeIntConstant(kSystemConstantEdramPolyOffsetBackOffset));
+    spv::Id poly_offset_back_offset = builder_->createLoad(
+        builder_->createAccessChain(spv::StorageClassUniform,
+                                    uniform_system_constants_, id_vector_temp_),
+        spv::NoPrecision);
+    poly_offset_offset = builder_->createTriOp(
+        spv::OpSelect, type_float_, front_facing, poly_offset_front_offset,
+        poly_offset_back_offset);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(
+        builder_->makeIntConstant(kSystemConstantEdramStencilFront));
+    spv::Id stencil_parameters_front = builder_->createLoad(
+        builder_->createAccessChain(spv::StorageClassUniform,
+                                    uniform_system_constants_, id_vector_temp_),
+        spv::NoPrecision);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(
+        builder_->makeIntConstant(kSystemConstantEdramStencilBack));
+    spv::Id stencil_parameters_back = builder_->createLoad(
+        builder_->createAccessChain(spv::StorageClassUniform,
+                                    uniform_system_constants_, id_vector_temp_),
+        spv::NoPrecision);
+    stencil_parameters = builder_->createTriOp(
+        spv::OpSelect, type_uint2_,
+        builder_->smearScalar(spv::NoPrecision, front_facing, type_bool2_),
+        stencil_parameters_front, stencil_parameters_back);
+  }
+  spv::Id stencil_reference_masks =
+      builder_->createCompositeExtract(stencil_parameters, type_uint_, 0);
+  spv::Id stencil_reference = builder_->createTriOp(
+      spv::OpBitFieldUExtract, type_uint_, stencil_reference_masks,
+      const_uint_0_, const_uint_8);
+  spv::Id stencil_read_mask = builder_->createTriOp(
+      spv::OpBitFieldUExtract, type_uint_, stencil_reference_masks,
+      const_uint_8, const_uint_8);
+  spv::Id stencil_reference_read_masked = builder_->createBinOp(
+      spv::OpBitwiseAnd, type_uint_, stencil_reference, stencil_read_mask);
+  spv::Id stencil_write_mask = builder_->createTriOp(
+      spv::OpBitFieldUExtract, type_uint_, stencil_reference_masks,
+      builder_->makeUintConstant(16), const_uint_8);
+  spv::Id stencil_write_keep_mask =
+      builder_->createUnaryOp(spv::OpNot, type_uint_, stencil_write_mask);
+  spv::Id stencil_func_ops =
+      builder_->createCompositeExtract(stencil_parameters, type_uint_, 1);
+  spv::Id stencil_pass_if_less = builder_->createBinOp(
+      spv::OpINotEqual, type_bool_,
+      builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, stencil_func_ops,
+                            builder_->makeUintConstant(uint32_t(1) << 0)),
+      const_uint_0_);
+  spv::Id stencil_pass_if_equal = builder_->createBinOp(
+      spv::OpINotEqual, type_bool_,
+      builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, stencil_func_ops,
+                            builder_->makeUintConstant(uint32_t(1) << 1)),
+      const_uint_0_);
+  spv::Id stencil_pass_if_greater = builder_->createBinOp(
+      spv::OpINotEqual, type_bool_,
+      builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, stencil_func_ops,
+                            builder_->makeUintConstant(uint32_t(1) << 2)),
+      const_uint_0_);
+
+  spv::Id center_depth32_biased;
+
+  // When the guest shader replaces depth, don't apply offset from the original
+  // FragCoord.z plane. That would mix two different depth sources.
+  if (current_shader().writes_depth()) {
+    center_depth32_biased = center_depth32_unbiased;
+  } else {
+    // Get the maximum depth slope for the polygon offset.
+    // https://docs.microsoft.com/en-us/windows/desktop/direct3d9/depth-bias
+    std::array<spv::Id, 2> depth_dxy_abs;
+    for (uint32_t i = 0; i < 2; ++i) {
+      depth_dxy_abs[i] = builder_->createUnaryBuiltinCall(
+          type_float_, ext_inst_glsl_std_450_, GLSLstd450FAbs, depth_dxy[i]);
+    }
+    spv::Id depth_max_slope = builder_->createBinBuiltinCall(
+        type_float_, ext_inst_glsl_std_450_, GLSLstd450FMax, depth_dxy_abs[0],
+        depth_dxy_abs[1]);
+    // Calculate the polygon offset.
+    spv::Id slope_scaled_poly_offset = builder_->createNoContractionBinOp(
+        spv::OpFMul, type_float_, poly_offset_scale, depth_max_slope);
+    spv::Id poly_offset = builder_->createNoContractionBinOp(
+        spv::OpFAdd, type_float_, slope_scaled_poly_offset, poly_offset_offset);
+    // Apply the post-clip and post-viewport polygon offset to the fragment's
+    // depth. Not clamping yet as this is at the center, which is not
+    // necessarily covered and not necessarily inside the bounds - derivatives
+    // scaled by sample locations will be added to this value, and it must be
+    // linear.
+    center_depth32_biased = builder_->createNoContractionBinOp(
+        spv::OpFAdd, type_float_, center_depth32_unbiased, poly_offset);
+  }
+
+  // Perform depth and stencil testing for each covered sample.
+  spv::Id new_sample_mask = main_fsi_sample_mask_;
+  std::array<spv::Id, 4> late_write_depth_stencil{};
+  for (uint32_t i = 0; i < 4; ++i) {
+    spv::Id sample_covered = builder_->createBinOp(
+        spv::OpINotEqual, type_bool_,
+        builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, new_sample_mask,
+                              builder_->makeUintConstant(uint32_t(1) << i)),
+        const_uint_0_);
+    SpirvBuilder::IfBuilder if_sample_covered(
+        sample_covered, spv::SelectionControlDontFlattenMask, *builder_);
+
+    // Load the original depth and stencil for the sample.
+    spv::Id sample_address = FSI_AddSampleOffset(main_fsi_address_depth_, i);
+    id_vector_temp_.clear();
+    // First SSBO structure element.
+    id_vector_temp_.push_back(const_int_0_);
+    id_vector_temp_.push_back(sample_address);
+    spv::Id sample_access_chain = builder_->createAccessChain(
+        features_.spirv_version >= spv::Spv_1_3 ? spv::StorageClassStorageBuffer
+                                                : spv::StorageClassUniform,
+        buffer_edram_, id_vector_temp_);
+    spv::Id old_depth_stencil =
+        builder_->createLoad(sample_access_chain, spv::NoPrecision);
+
+    // Calculate the new depth at the sample.
+    // interpolateAtSample(gl_FragCoord) is not valid in GLSL because
+    // gl_FragCoord is not an interpolator, calculating the depths at the
+    // samples manually.
+    std::array<spv::Id, 2> sample_location;
+    switch (i) {
+      case 0: {
+        // Center sample for no MSAA.
+        // Top-left sample for native 2x (top - 1 in Vulkan), 2x as 4x, 4x
+        // (0 in Vulkan).
+        // 4x on the host case.
+        for (uint32_t j = 0; j < 2; ++j) {
+          sample_location[j] = builder_->makeFloatConstant(
+              draw_util::kD3D10StandardSamplePositions4x[0][j] *
+              (1.0f / 16.0f));
+        }
+        if (native_2x_msaa_no_attachments_) {
+          // 2x on the host case.
+          for (uint32_t j = 0; j < 2; ++j) {
+            sample_location[j] = builder_->createTriOp(
+                spv::OpSelect, type_float_, msaa_is_4x, sample_location[j],
+                builder_->makeFloatConstant(
+                    draw_util::kD3D10StandardSamplePositions2x[1][j] *
+                    (1.0f / 16.0f)));
+          }
+        }
+        // 1x case.
+        for (uint32_t j = 0; j < 2; ++j) {
+          sample_location[j] =
+              builder_->createTriOp(spv::OpSelect, type_float_, msaa_is_2x_4x,
+                                    sample_location[j], const_float_0_);
+        }
+      } break;
+      case 1: {
+        // For guest 2x: bottom-right sample (bottom - 0 in Vulkan - for native
+        // 2x, bottom-right - 3 in Vulkan - for 2x as 4x).
+        // For guest 4x: bottom-left sample (2 in Vulkan).
+        for (uint32_t j = 0; j < 2; ++j) {
+          sample_location[j] = builder_->createTriOp(
+              spv::OpSelect, type_float_, msaa_is_4x,
+              builder_->makeFloatConstant(
+                  draw_util::kD3D10StandardSamplePositions4x[2][j] *
+                  (1.0f / 16.0f)),
+              builder_->makeFloatConstant(
+                  (native_2x_msaa_no_attachments_
+                       ? draw_util::kD3D10StandardSamplePositions2x[0][j]
+                       : draw_util::kD3D10StandardSamplePositions4x[3][j]) *
+                  (1.0f / 16.0f)));
+        }
+      } break;
+      default: {
+        // Xenia samples 2 and 3 (top-right and bottom-right) -> Vulkan samples
+        // 1 and 3.
+        const int8_t* sample_location_int = draw_util::
+            kD3D10StandardSamplePositions4x[i ^ (((i & 1) ^ (i >> 1)) * 0b11)];
+        for (uint32_t j = 0; j < 2; ++j) {
+          sample_location[j] = builder_->makeFloatConstant(
+              sample_location_int[j] * (1.0f / 16.0f));
+        }
+      } break;
+    }
+    std::array<spv::Id, 2> sample_depth_dxy;
+    for (uint32_t j = 0; j < 2; ++j) {
+      sample_depth_dxy[j] = builder_->createNoContractionBinOp(
+          spv::OpFMul, type_float_, sample_location[j], depth_dxy[j]);
+    }
+    spv::Id sample_depth32 = builder_->createTriBuiltinCall(
+        type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp,
+        builder_->createNoContractionBinOp(
+            spv::OpFAdd, type_float_, center_depth32_biased,
+            builder_->createNoContractionBinOp(spv::OpFAdd, type_float_,
+                                               sample_depth_dxy[0],
+                                               sample_depth_dxy[1])),
+        const_float_0_, const_float_1_);
+
+    // Convert the new depth to 24-bit.
+    SpirvBuilder::IfBuilder depth_format_if(
+        depth_is_float24, spv::SelectionControlDontFlattenMask, *builder_);
+    spv::Id sample_depth_float24 = SpirvShaderTranslator::PreClampedDepthTo20e4(
+        *builder_, sample_depth32, true, false, ext_inst_glsl_std_450_);
+    depth_format_if.makeBeginElse();
+    // Round to the nearest even integer. This seems to be the correct
+    // conversion, adding +0.5 and rounding towards zero results in red instead
+    // of black in the 4D5307E6 clear shader.
+    spv::Id sample_depth_unorm24 = builder_->createUnaryOp(
+        spv::OpConvertFToU, type_uint_,
+        builder_->createUnaryBuiltinCall(
+            type_float_, ext_inst_glsl_std_450_, GLSLstd450RoundEven,
+            builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_, sample_depth32,
+                builder_->makeFloatConstant(float(0xFFFFFF)))));
+    depth_format_if.makeEndIf();
+    // Merge between the two formats.
+    spv::Id sample_depth24 = depth_format_if.createMergePhi(
+        sample_depth_float24, sample_depth_unorm24);
+
+    // Perform the depth test.
+    spv::Id old_depth = builder_->createBinOp(
+        spv::OpShiftRightLogical, type_uint_, old_depth_stencil, const_uint_8);
+    spv::Id depth_passed = builder_->createBinOp(
+        spv::OpLogicalAnd, type_bool_, depth_pass_if_less,
+        builder_->createBinOp(spv::OpULessThan, type_bool_, sample_depth24,
+                              old_depth));
+    depth_passed = builder_->createBinOp(
+        spv::OpLogicalOr, type_bool_, depth_passed,
+        builder_->createBinOp(
+            spv::OpLogicalAnd, type_bool_, depth_pass_if_equal,
+            builder_->createBinOp(spv::OpIEqual, type_bool_, sample_depth24,
+                                  old_depth)));
+    depth_passed = builder_->createBinOp(
+        spv::OpLogicalOr, type_bool_, depth_passed,
+        builder_->createBinOp(
+            spv::OpLogicalAnd, type_bool_, depth_pass_if_greater,
+            builder_->createBinOp(spv::OpUGreaterThan, type_bool_,
+                                  sample_depth24, old_depth)));
+
+    // Perform the stencil test if enabled.
+    SpirvBuilder::IfBuilder stencil_if(
+        stencil_enabled, spv::SelectionControlDontFlattenMask, *builder_);
+    spv::Id stencil_passed_if_enabled;
+    spv::Id new_stencil_and_old_depth_if_stencil_enabled;
+    {
+      // The read mask has zeros in the upper bits, applying it to the combined
+      // stencil and depth will remove the depth part.
+      spv::Id old_stencil_read_masked = builder_->createBinOp(
+          spv::OpBitwiseAnd, type_uint_, old_depth_stencil, stencil_read_mask);
+      stencil_passed_if_enabled = builder_->createBinOp(
+          spv::OpLogicalAnd, type_bool_, stencil_pass_if_less,
+          builder_->createBinOp(spv::OpULessThan, type_bool_,
+                                stencil_reference_read_masked,
+                                old_stencil_read_masked));
+      stencil_passed_if_enabled = builder_->createBinOp(
+          spv::OpLogicalOr, type_bool_, stencil_passed_if_enabled,
+          builder_->createBinOp(
+              spv::OpLogicalAnd, type_bool_, stencil_pass_if_equal,
+              builder_->createBinOp(spv::OpIEqual, type_bool_,
+                                    stencil_reference_read_masked,
+                                    old_stencil_read_masked)));
+      stencil_passed_if_enabled = builder_->createBinOp(
+          spv::OpLogicalOr, type_bool_, stencil_passed_if_enabled,
+          builder_->createBinOp(
+              spv::OpLogicalAnd, type_bool_, stencil_pass_if_greater,
+              builder_->createBinOp(spv::OpUGreaterThan, type_bool_,
+                                    stencil_reference_read_masked,
+                                    old_stencil_read_masked)));
+      spv::Id stencil_op = builder_->createTriOp(
+          spv::OpBitFieldUExtract, type_uint_, stencil_func_ops,
+          builder_->createTriOp(
+              spv::OpSelect, type_uint_, stencil_passed_if_enabled,
+              builder_->createTriOp(spv::OpSelect, type_uint_, depth_passed,
+                                    builder_->makeUintConstant(6),
+                                    builder_->makeUintConstant(9)),
+              builder_->makeUintConstant(3)),
+          builder_->makeUintConstant(3));
+      spv::Block& block_stencil_op_head = *builder_->getBuildPoint();
+      spv::Block& block_stencil_op_keep = builder_->makeNewBlock();
+      spv::Block& block_stencil_op_zero = builder_->makeNewBlock();
+      spv::Block& block_stencil_op_replace = builder_->makeNewBlock();
+      spv::Block& block_stencil_op_increment_clamp = builder_->makeNewBlock();
+      spv::Block& block_stencil_op_decrement_clamp = builder_->makeNewBlock();
+      spv::Block& block_stencil_op_invert = builder_->makeNewBlock();
+      spv::Block& block_stencil_op_increment_wrap = builder_->makeNewBlock();
+      spv::Block& block_stencil_op_decrement_wrap = builder_->makeNewBlock();
+      spv::Block& block_stencil_op_merge = builder_->makeNewBlock();
+      builder_->createSelectionMerge(&block_stencil_op_merge,
+                                     spv::SelectionControlDontFlattenMask);
+      {
+        std::unique_ptr<spv::Instruction> stencil_op_switch_op =
+            std::make_unique<spv::Instruction>(spv::OpSwitch);
+        stencil_op_switch_op->addIdOperand(stencil_op);
+        // Make keep the default.
+        stencil_op_switch_op->addIdOperand(block_stencil_op_keep.getId());
+        stencil_op_switch_op->addImmediateOperand(
+            int32_t(xenos::StencilOp::kZero));
+        stencil_op_switch_op->addIdOperand(block_stencil_op_zero.getId());
+        stencil_op_switch_op->addImmediateOperand(
+            int32_t(xenos::StencilOp::kReplace));
+        stencil_op_switch_op->addIdOperand(block_stencil_op_replace.getId());
+        stencil_op_switch_op->addImmediateOperand(
+            int32_t(xenos::StencilOp::kIncrementClamp));
+        stencil_op_switch_op->addIdOperand(
+            block_stencil_op_increment_clamp.getId());
+        stencil_op_switch_op->addImmediateOperand(
+            int32_t(xenos::StencilOp::kDecrementClamp));
+        stencil_op_switch_op->addIdOperand(
+            block_stencil_op_decrement_clamp.getId());
+        stencil_op_switch_op->addImmediateOperand(
+            int32_t(xenos::StencilOp::kInvert));
+        stencil_op_switch_op->addIdOperand(block_stencil_op_invert.getId());
+        stencil_op_switch_op->addImmediateOperand(
+            int32_t(xenos::StencilOp::kIncrementWrap));
+        stencil_op_switch_op->addIdOperand(
+            block_stencil_op_increment_wrap.getId());
+        stencil_op_switch_op->addImmediateOperand(
+            int32_t(xenos::StencilOp::kDecrementWrap));
+        stencil_op_switch_op->addIdOperand(
+            block_stencil_op_decrement_wrap.getId());
+        builder_->getBuildPoint()->addInstruction(
+            std::move(stencil_op_switch_op));
+      }
+      block_stencil_op_keep.addPredecessor(&block_stencil_op_head);
+      block_stencil_op_zero.addPredecessor(&block_stencil_op_head);
+      block_stencil_op_replace.addPredecessor(&block_stencil_op_head);
+      block_stencil_op_increment_clamp.addPredecessor(&block_stencil_op_head);
+      block_stencil_op_decrement_clamp.addPredecessor(&block_stencil_op_head);
+      block_stencil_op_invert.addPredecessor(&block_stencil_op_head);
+      block_stencil_op_increment_wrap.addPredecessor(&block_stencil_op_head);
+      block_stencil_op_decrement_wrap.addPredecessor(&block_stencil_op_head);
+      // Keep - will use the old stencil in the phi.
+      builder_->setBuildPoint(&block_stencil_op_keep);
+      builder_->createBranch(&block_stencil_op_merge);
+      // Zero - will use the zero constant in the phi.
+      builder_->setBuildPoint(&block_stencil_op_zero);
+      builder_->createBranch(&block_stencil_op_merge);
+      // Replace - will use the stencil reference in the phi.
+      builder_->setBuildPoint(&block_stencil_op_replace);
+      builder_->createBranch(&block_stencil_op_merge);
+      // Increment and clamp.
+      builder_->setBuildPoint(&block_stencil_op_increment_clamp);
+      spv::Id new_stencil_in_low_bits_increment_clamp = builder_->createBinOp(
+          spv::OpIAdd, type_uint_,
+          builder_->createBinBuiltinCall(
+              type_uint_, ext_inst_glsl_std_450_, GLSLstd450UMin,
+              builder_->makeUintConstant(UINT8_MAX - 1),
+              builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                    old_depth_stencil,
+                                    builder_->makeUintConstant(UINT8_MAX))),
+          const_uint_1);
+      builder_->createBranch(&block_stencil_op_merge);
+      // Decrement and clamp.
+      builder_->setBuildPoint(&block_stencil_op_decrement_clamp);
+      spv::Id new_stencil_in_low_bits_decrement_clamp = builder_->createBinOp(
+          spv::OpISub, type_uint_,
+          builder_->createBinBuiltinCall(
+              type_uint_, ext_inst_glsl_std_450_, GLSLstd450UMax, const_uint_1,
+              builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                    old_depth_stencil,
+                                    builder_->makeUintConstant(UINT8_MAX))),
+          const_uint_1);
+      builder_->createBranch(&block_stencil_op_merge);
+      // Invert.
+      builder_->setBuildPoint(&block_stencil_op_invert);
+      spv::Id new_stencil_in_low_bits_invert =
+          builder_->createUnaryOp(spv::OpNot, type_uint_, old_depth_stencil);
+      builder_->createBranch(&block_stencil_op_merge);
+      // Increment and wrap.
+      // The upper bits containing the old depth have no effect on the behavior.
+      builder_->setBuildPoint(&block_stencil_op_increment_wrap);
+      spv::Id new_stencil_in_low_bits_increment_wrap = builder_->createBinOp(
+          spv::OpIAdd, type_uint_, old_depth_stencil, const_uint_1);
+      builder_->createBranch(&block_stencil_op_merge);
+      // Decrement and wrap.
+      // The upper bits containing the old depth have no effect on the behavior.
+      builder_->setBuildPoint(&block_stencil_op_decrement_wrap);
+      spv::Id new_stencil_in_low_bits_decrement_wrap = builder_->createBinOp(
+          spv::OpISub, type_uint_, old_depth_stencil, const_uint_1);
+      builder_->createBranch(&block_stencil_op_merge);
+      // Select the new stencil (with undefined data in bits starting from 8)
+      // based on the stencil operation.
+      builder_->setBuildPoint(&block_stencil_op_merge);
+      id_vector_temp_.clear();
+      id_vector_temp_.reserve(2 * 8);
+      id_vector_temp_.push_back(old_depth_stencil);
+      id_vector_temp_.push_back(block_stencil_op_keep.getId());
+      id_vector_temp_.push_back(const_uint_0_);
+      id_vector_temp_.push_back(block_stencil_op_zero.getId());
+      id_vector_temp_.push_back(stencil_reference);
+      id_vector_temp_.push_back(block_stencil_op_replace.getId());
+      id_vector_temp_.push_back(new_stencil_in_low_bits_increment_clamp);
+      id_vector_temp_.push_back(block_stencil_op_increment_clamp.getId());
+      id_vector_temp_.push_back(new_stencil_in_low_bits_decrement_clamp);
+      id_vector_temp_.push_back(block_stencil_op_decrement_clamp.getId());
+      id_vector_temp_.push_back(new_stencil_in_low_bits_invert);
+      id_vector_temp_.push_back(block_stencil_op_invert.getId());
+      id_vector_temp_.push_back(new_stencil_in_low_bits_increment_wrap);
+      id_vector_temp_.push_back(block_stencil_op_increment_wrap.getId());
+      id_vector_temp_.push_back(new_stencil_in_low_bits_decrement_wrap);
+      id_vector_temp_.push_back(block_stencil_op_decrement_wrap.getId());
+      spv::Id new_stencil_in_low_bits_if_enabled =
+          builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+      // Merge the old depth / stencil (old depth kept from the old depth /
+      // stencil so the separate old depth register is not needed anymore after
+      // the depth test) and the new stencil based on the write mask.
+      new_stencil_and_old_depth_if_stencil_enabled = builder_->createBinOp(
+          spv::OpBitwiseOr, type_uint_,
+          builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                old_depth_stencil, stencil_write_keep_mask),
+          builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                new_stencil_in_low_bits_if_enabled,
+                                stencil_write_mask));
+    }
+    stencil_if.makeEndIf();
+    // Choose the result based on whether the stencil test was done.
+    // All phi operations must be the first in the block.
+    spv::Id stencil_passed = stencil_if.createMergePhi(
+        stencil_passed_if_enabled, builder_->makeBoolConstant(true));
+    spv::Id new_stencil_and_old_depth = stencil_if.createMergePhi(
+        new_stencil_and_old_depth_if_stencil_enabled, old_depth_stencil);
+
+    // Check whether the tests have passed, and exclude the bit from the
+    // coverage if not.
+    spv::Id depth_stencil_passed = builder_->createBinOp(
+        spv::OpLogicalAnd, type_bool_, depth_passed, stencil_passed);
+    spv::Id new_sample_mask_after_sample = builder_->createTriOp(
+        spv::OpSelect, type_uint_, depth_stencil_passed, new_sample_mask,
+        builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, new_sample_mask,
+                              builder_->makeUintConstant(~(uint32_t(1) << i))));
+
+    // Combine the new depth and the new stencil taking into account whether the
+    // new depth should be written.
+    spv::Id new_stencil_and_unconditional_new_depth = builder_->createQuadOp(
+        spv::OpBitFieldInsert, type_uint_, new_stencil_and_old_depth,
+        sample_depth24, const_uint_8, builder_->makeUintConstant(24));
+    spv::Id new_depth_stencil = builder_->createTriOp(
+        spv::OpSelect, type_uint_,
+        builder_->createBinOp(spv::OpLogicalAnd, type_bool_,
+                              depth_stencil_passed, depth_write),
+        new_stencil_and_unconditional_new_depth, new_stencil_and_old_depth);
+
+    // Write (or defer writing if the test is early, but may discard samples
+    // later still) the new depth and stencil if they're different.
+    spv::Id new_depth_stencil_different = builder_->createBinOp(
+        spv::OpINotEqual, type_bool_, new_depth_stencil, old_depth_stencil);
+    spv::Id new_depth_stencil_write_condition = spv::NoResult;
+    if (is_early) {
+      if (implicit_early_z_write_allowed) {
+        new_sample_mask_after_sample = builder_->createTriOp(
+            spv::OpSelect, type_uint_,
+            builder_->createBinOp(spv::OpLogicalAnd, type_bool_,
+                                  new_depth_stencil_different, not_early_write),
+            builder_->createBinOp(
+                spv::OpBitwiseOr, type_uint_, new_sample_mask_after_sample,
+                builder_->makeUintConstant(uint32_t(1) << (4 + i))),
+            new_sample_mask_after_sample);
+        new_depth_stencil_write_condition =
+            builder_->createBinOp(spv::OpLogicalAnd, type_bool_,
+                                  new_depth_stencil_different, early_write);
+      } else {
+        // Always need to write late in this shader, as it may do something like
+        // explicitly killing pixels.
+        new_sample_mask_after_sample = builder_->createTriOp(
+            spv::OpSelect, type_uint_, new_depth_stencil_different,
+            builder_->createBinOp(
+                spv::OpBitwiseOr, type_uint_, new_sample_mask_after_sample,
+                builder_->makeUintConstant(uint32_t(1) << (4 + i))),
+            new_sample_mask_after_sample);
+      }
+    } else {
+      new_depth_stencil_write_condition = new_depth_stencil_different;
+    }
+    if (new_depth_stencil_write_condition != spv::NoResult) {
+      SpirvBuilder::IfBuilder new_depth_stencil_write_if(
+          new_depth_stencil_write_condition,
+          spv::SelectionControlDontFlattenMask, *builder_);
+      builder_->createStore(new_depth_stencil, sample_access_chain);
+      new_depth_stencil_write_if.makeEndIf();
+    }
+
+    if_sample_covered.makeEndIf();
+    new_sample_mask = if_sample_covered.createMergePhi(
+        new_sample_mask_after_sample, new_sample_mask);
+    if (is_early) {
+      late_write_depth_stencil[i] =
+          if_sample_covered.createMergePhi(new_depth_stencil, const_uint_0_);
+    }
+  }
+
+  // Close the conditionals for whether depth / stencil testing is needed.
+  if (block_any_sample_covered_merge) {
+    builder_->createBranch(block_any_sample_covered_merge);
+    spv::Block& block_any_sample_covered_end = *builder_->getBuildPoint();
+    builder_->setBuildPoint(block_any_sample_covered_merge);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(new_sample_mask);
+    id_vector_temp_.push_back(block_any_sample_covered_end.getId());
+    id_vector_temp_.push_back(main_fsi_sample_mask_);
+    id_vector_temp_.push_back(block_any_sample_covered_head->getId());
+    new_sample_mask =
+        builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+    if (is_early) {
+      for (uint32_t i = 0; i < 4; ++i) {
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(late_write_depth_stencil[i]);
+        id_vector_temp_.push_back(block_any_sample_covered_end.getId());
+        id_vector_temp_.push_back(const_uint_0_);
+        id_vector_temp_.push_back(block_any_sample_covered_head->getId());
+        late_write_depth_stencil[i] =
+            builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+      }
+    }
+  }
+  if_depth_stencil_enabled.makeEndIf();
+  main_fsi_sample_mask_ = if_depth_stencil_enabled.createMergePhi(
+      new_sample_mask, main_fsi_sample_mask_);
+  if (is_early) {
+    for (uint32_t i = 0; i < 4; ++i) {
+      main_fsi_late_write_depth_stencil_[i] =
+          if_depth_stencil_enabled.createMergePhi(late_write_depth_stencil[i],
+                                                  const_uint_0_);
+    }
+  }
+}
+
+spv::Id SpirvShaderTranslator::PackFloat16x2ExtendedRange(
+    spv::Id float2_value) {
+  // The Xbox 360 float16 has no NaN, map it to 0. Also keeps the overflow
+  // detection below from misreading a NaN's exponent 31 as a finite extended
+  // value, and FClamp's NaN result is undefined.
+  float2_value = builder_->createTriOp(
+      spv::OpSelect, type_float2_,
+      builder_->createUnaryOp(spv::OpIsNan, type_bool2_, float2_value),
+      const_float2_0_, float2_value);
+  // Standard conversion handles +-0..65504; larger magnitudes overflow to Inf
+  // (exponent field 0x7C00). Re-encode the overflowed lanes using the extended
+  // range: halve into the standard range, convert (exponent <= 30), then bump
+  // the exponent by 1 into the exponent 31 slot the Xbox 360 treats as finite.
+  spv::Id standard = builder_->createUnaryBuiltinCall(
+      type_uint_, ext_inst_glsl_std_450_, GLSLstd450PackHalf2x16, float2_value);
+  spv::Id const_0x7C00 = builder_->makeUintConstant(0x7C00);
+  spv::Id lower_overflow =
+      builder_->createBinOp(spv::OpIEqual, type_bool_,
+                            builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                                  standard, const_0x7C00),
+                            const_0x7C00);
+  spv::Id upper_overflow = builder_->createBinOp(
+      spv::OpIEqual, type_bool_,
+      builder_->createBinOp(
+          spv::OpBitwiseAnd, type_uint_,
+          builder_->createBinOp(spv::OpShiftRightLogical, type_uint_, standard,
+                                builder_->makeUintConstant(16)),
+          const_0x7C00),
+      const_0x7C00);
+  id_vector_temp_.clear();
+  id_vector_temp_.resize(2, builder_->makeFloatConstant(-131008.0f));
+  spv::Id const_neg_131008 =
+      builder_->makeCompositeConstant(type_float2_, id_vector_temp_);
+  id_vector_temp_.clear();
+  id_vector_temp_.resize(2, builder_->makeFloatConstant(131008.0f));
+  spv::Id const_131008 =
+      builder_->makeCompositeConstant(type_float2_, id_vector_temp_);
+  spv::Id clamped = builder_->createTriBuiltinCall(
+      type_float2_, ext_inst_glsl_std_450_, GLSLstd450FClamp, float2_value,
+      const_neg_131008, const_131008);
+  id_vector_temp_.clear();
+  id_vector_temp_.resize(2, builder_->makeFloatConstant(0.5f));
+  spv::Id halved = builder_->createBinOp(
+      spv::OpFMul, type_float2_, clamped,
+      builder_->makeCompositeConstant(type_float2_, id_vector_temp_));
+  spv::Id halved_packed = builder_->createUnaryBuiltinCall(
+      type_uint_, ext_inst_glsl_std_450_, GLSLstd450PackHalf2x16, halved);
+  // halved_packed has exponent <= 30 in both lanes, so adding 0x0400 per lane
+  // bumps the exponent without ever carrying across lanes.
+  spv::Id extended =
+      builder_->createBinOp(spv::OpIAdd, type_uint_, halved_packed,
+                            builder_->makeUintConstant(0x04000400));
+  spv::Id const_0xFFFF = builder_->makeUintConstant(0xFFFF);
+  spv::Id const_0xFFFF0000 = builder_->makeUintConstant(0xFFFF0000);
+  spv::Id result_lower =
+      builder_->createTriOp(spv::OpSelect, type_uint_, lower_overflow,
+                            builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                                  extended, const_0xFFFF),
+                            builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                                  standard, const_0xFFFF));
+  spv::Id result_upper =
+      builder_->createTriOp(spv::OpSelect, type_uint_, upper_overflow,
+                            builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                                  extended, const_0xFFFF0000),
+                            builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                                  standard, const_0xFFFF0000));
+  return builder_->createBinOp(spv::OpBitwiseOr, type_uint_, result_lower,
+                               result_upper);
+}
+
+spv::Id SpirvShaderTranslator::UnpackFloat16x2ExtendedRange(
+    spv::Id packed_uint) {
+  // Inverse of PackFloat16x2ExtendedRange. Exponent 31 lanes are large finite
+  // values, not Inf/NaN - decrement their exponent by 1 into the standard
+  // range, unpack, then double to compensate.
+  spv::Id const_0x7C00 = builder_->makeUintConstant(0x7C00);
+  spv::Id lower_overflow =
+      builder_->createBinOp(spv::OpIEqual, type_bool_,
+                            builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                                  packed_uint, const_0x7C00),
+                            const_0x7C00);
+  spv::Id upper_overflow = builder_->createBinOp(
+      spv::OpIEqual, type_bool_,
+      builder_->createBinOp(
+          spv::OpBitwiseAnd, type_uint_,
+          builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
+                                packed_uint, builder_->makeUintConstant(16)),
+          const_0x7C00),
+      const_0x7C00);
+  spv::Id standard =
+      builder_->createUnaryBuiltinCall(type_float2_, ext_inst_glsl_std_450_,
+                                       GLSLstd450UnpackHalf2x16, packed_uint);
+  // Decrement the exponent only in overflowed lanes (0x0400 in the low lane,
+  // 0x04000000 in the high one) so the subtraction never borrows across lanes.
+  spv::Id sub_lower =
+      builder_->createTriOp(spv::OpSelect, type_uint_, lower_overflow,
+                            builder_->makeUintConstant(0x0400), const_uint_0_);
+  spv::Id sub_upper = builder_->createTriOp(
+      spv::OpSelect, type_uint_, upper_overflow,
+      builder_->makeUintConstant(0x04000000), const_uint_0_);
+  spv::Id reduced =
+      builder_->createBinOp(spv::OpISub, type_uint_, packed_uint,
+                            builder_->createBinOp(spv::OpBitwiseOr, type_uint_,
+                                                  sub_lower, sub_upper));
+  spv::Id reduced_unpacked = builder_->createUnaryBuiltinCall(
+      type_float2_, ext_inst_glsl_std_450_, GLSLstd450UnpackHalf2x16, reduced);
+  id_vector_temp_.clear();
+  id_vector_temp_.resize(2, builder_->makeFloatConstant(2.0f));
+  spv::Id extended = builder_->createBinOp(
+      spv::OpFMul, type_float2_, reduced_unpacked,
+      builder_->makeCompositeConstant(type_float2_, id_vector_temp_));
+  spv::Id result_x = builder_->createTriOp(
+      spv::OpSelect, type_float_, lower_overflow,
+      builder_->createCompositeExtract(extended, type_float_, 0),
+      builder_->createCompositeExtract(standard, type_float_, 0));
+  spv::Id result_y = builder_->createTriOp(
+      spv::OpSelect, type_float_, upper_overflow,
+      builder_->createCompositeExtract(extended, type_float_, 1),
+      builder_->createCompositeExtract(standard, type_float_, 1));
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(result_x);
+  id_vector_temp_.push_back(result_y);
+  return builder_->createCompositeConstruct(type_float2_, id_vector_temp_);
+}
+
+std::array<spv::Id, 2> SpirvShaderTranslator::FSI_ClampAndPackColor(
+    spv::Id color_float4, spv::Id format_with_flags) {
+  spv::Block& block_format_head = *builder_->getBuildPoint();
+  spv::Block& block_format_8_8_8_8 = builder_->makeNewBlock();
+  spv::Block& block_format_8_8_8_8_gamma = builder_->makeNewBlock();
+  spv::Block& block_format_2_10_10_10 = builder_->makeNewBlock();
+  spv::Block& block_format_2_10_10_10_float = builder_->makeNewBlock();
+  spv::Block& block_format_16 = builder_->makeNewBlock();
+  spv::Block& block_format_16_float = builder_->makeNewBlock();
+  spv::Block& block_format_32_float = builder_->makeNewBlock();
+  spv::Block& block_format_merge = builder_->makeNewBlock();
+  builder_->createSelectionMerge(&block_format_merge,
+                                 spv::SelectionControlDontFlattenMask);
+  {
+    std::unique_ptr<spv::Instruction> format_switch_op =
+        std::make_unique<spv::Instruction>(spv::OpSwitch);
+    format_switch_op->addIdOperand(format_with_flags);
+    // Make k_32_FLOAT or k_32_32_FLOAT the default.
+    format_switch_op->addIdOperand(block_format_32_float.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_8_8_8_8)));
+    format_switch_op->addIdOperand(block_format_8_8_8_8.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA)));
+    format_switch_op->addIdOperand(block_format_8_8_8_8_gamma.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_2_10_10_10)));
+    format_switch_op->addIdOperand(block_format_2_10_10_10.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10)));
+    format_switch_op->addIdOperand(block_format_2_10_10_10.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT)));
+    format_switch_op->addIdOperand(block_format_2_10_10_10_float.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat ::
+                k_2_10_10_10_FLOAT_AS_16_16_16_16)));
+    format_switch_op->addIdOperand(block_format_2_10_10_10_float.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_16_16)));
+    format_switch_op->addIdOperand(block_format_16.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_16_16_16_16)));
+    format_switch_op->addIdOperand(block_format_16.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_16_16_FLOAT)));
+    format_switch_op->addIdOperand(block_format_16_float.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT)));
+    format_switch_op->addIdOperand(block_format_16_float.getId());
+    builder_->getBuildPoint()->addInstruction(std::move(format_switch_op));
+  }
+  block_format_8_8_8_8.addPredecessor(&block_format_head);
+  block_format_8_8_8_8_gamma.addPredecessor(&block_format_head);
+  block_format_2_10_10_10.addPredecessor(&block_format_head);
+  block_format_2_10_10_10_float.addPredecessor(&block_format_head);
+  block_format_16.addPredecessor(&block_format_head);
+  block_format_16_float.addPredecessor(&block_format_head);
+  block_format_32_float.addPredecessor(&block_format_head);
+
+  spv::Id unorm_round_offset_float = builder_->makeFloatConstant(0.5f);
+  id_vector_temp_.clear();
+  id_vector_temp_.resize(4, unorm_round_offset_float);
+  spv::Id unorm_round_offset_float4 =
+      builder_->makeCompositeConstant(type_float4_, id_vector_temp_);
+
+  // ***************************************************************************
+  // k_8_8_8_8
+  // ***************************************************************************
+  spv::Id packed_8_8_8_8;
+  {
+    builder_->setBuildPoint(&block_format_8_8_8_8);
+    spv::Id color_scaled = builder_->createNoContractionBinOp(
+        spv::OpVectorTimesScalar, type_float4_,
+        builder_->createTriBuiltinCall(type_float4_, ext_inst_glsl_std_450_,
+                                       GLSLstd450NClamp, color_float4,
+                                       const_float4_0_, const_float4_1_),
+        builder_->makeFloatConstant(255.0f));
+    spv::Id color_offset = builder_->createNoContractionBinOp(
+        spv::OpFAdd, type_float4_, color_scaled, unorm_round_offset_float4);
+    spv::Id color_uint4 =
+        builder_->createUnaryOp(spv::OpConvertFToU, type_uint4_, color_offset);
+    packed_8_8_8_8 =
+        builder_->createCompositeExtract(color_uint4, type_uint_, 0);
+    spv::Id component_width = builder_->makeUintConstant(8);
+    for (uint32_t i = 1; i < 4; ++i) {
+      packed_8_8_8_8 = builder_->createQuadOp(
+          spv::OpBitFieldInsert, type_uint_, packed_8_8_8_8,
+          builder_->createCompositeExtract(color_uint4, type_uint_, i),
+          builder_->makeUintConstant(8 * i), component_width);
+    }
+    builder_->createBranch(&block_format_merge);
+  }
+  spv::Block& block_format_8_8_8_8_end = *builder_->getBuildPoint();
+
+  // ***************************************************************************
+  // k_8_8_8_8_GAMMA
+  // ***************************************************************************
+  spv::Id packed_8_8_8_8_gamma;
+  {
+    builder_->setBuildPoint(&block_format_8_8_8_8_gamma);
+    uint_vector_temp_.clear();
+    uint_vector_temp_.push_back(0);
+    uint_vector_temp_.push_back(1);
+    uint_vector_temp_.push_back(2);
+    spv::Id color_rgb = builder_->createRvalueSwizzle(
+        spv::NoPrecision, type_float3_, color_float4, uint_vector_temp_);
+    spv::Id rgb_gamma = SpirvShaderTranslator::LinearToPWLGamma(
+        builder_.get(),
+        builder_->createRvalueSwizzle(spv::NoPrecision, type_float3_,
+                                      color_float4, uint_vector_temp_),
+        false, ext_inst_glsl_std_450_);
+    spv::Id alpha_clamped = builder_->createTriBuiltinCall(
+        type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp,
+        builder_->createCompositeExtract(color_float4, type_float_, 3),
+        const_float_0_, const_float_1_);
+    // Bypass the `getNumTypeConstituents(typeId) == (int)constituents.size()`
+    // assertion in createCompositeConstruct, OpCompositeConstruct can
+    // construct vectors not only from scalars, but also from other vectors.
+    spv::Id color_gamma;
+    {
+      std::unique_ptr<spv::Instruction> color_gamma_composite_construct_op =
+          std::make_unique<spv::Instruction>(
+              builder_->getUniqueId(), type_float4_, spv::OpCompositeConstruct);
+      color_gamma_composite_construct_op->addIdOperand(rgb_gamma);
+      color_gamma_composite_construct_op->addIdOperand(alpha_clamped);
+      color_gamma = color_gamma_composite_construct_op->getResultId();
+      builder_->getBuildPoint()->addInstruction(
+          std::move(color_gamma_composite_construct_op));
+    }
+    spv::Id color_scaled = builder_->createNoContractionBinOp(
+        spv::OpVectorTimesScalar, type_float4_, color_gamma,
+        builder_->makeFloatConstant(255.0f));
+    spv::Id color_offset = builder_->createNoContractionBinOp(
+        spv::OpFAdd, type_float4_, color_scaled, unorm_round_offset_float4);
+    spv::Id color_uint4 =
+        builder_->createUnaryOp(spv::OpConvertFToU, type_uint4_, color_offset);
+    packed_8_8_8_8_gamma =
+        builder_->createCompositeExtract(color_uint4, type_uint_, 0);
+    spv::Id component_width = builder_->makeUintConstant(8);
+    for (uint32_t i = 1; i < 4; ++i) {
+      packed_8_8_8_8_gamma = builder_->createQuadOp(
+          spv::OpBitFieldInsert, type_uint_, packed_8_8_8_8_gamma,
+          builder_->createCompositeExtract(color_uint4, type_uint_, i),
+          builder_->makeUintConstant(8 * i), component_width);
+    }
+    builder_->createBranch(&block_format_merge);
+  }
+  spv::Block& block_format_8_8_8_8_gamma_end = *builder_->getBuildPoint();
+
+  // ***************************************************************************
+  // k_2_10_10_10
+  // k_2_10_10_10_AS_10_10_10_10
+  // ***************************************************************************
+  spv::Id packed_2_10_10_10;
+  {
+    builder_->setBuildPoint(&block_format_2_10_10_10);
+    spv::Id color_clamped = builder_->createTriBuiltinCall(
+        type_float4_, ext_inst_glsl_std_450_, GLSLstd450NClamp, color_float4,
+        const_float4_0_, const_float4_1_);
+    id_vector_temp_.clear();
+    id_vector_temp_.resize(3, builder_->makeFloatConstant(1023.0f));
+    id_vector_temp_.push_back(builder_->makeFloatConstant(3.0f));
+    spv::Id color_scaled = builder_->createNoContractionBinOp(
+        spv::OpFMul, type_float4_, color_clamped,
+        builder_->makeCompositeConstant(type_float4_, id_vector_temp_));
+    spv::Id color_offset = builder_->createNoContractionBinOp(
+        spv::OpFAdd, type_float4_, color_scaled, unorm_round_offset_float4);
+    spv::Id color_uint4 =
+        builder_->createUnaryOp(spv::OpConvertFToU, type_uint4_, color_offset);
+    packed_2_10_10_10 =
+        builder_->createCompositeExtract(color_uint4, type_uint_, 0);
+    spv::Id rgb_width = builder_->makeUintConstant(10);
+    spv::Id alpha_width = builder_->makeUintConstant(2);
+    for (uint32_t i = 1; i < 4; ++i) {
+      packed_2_10_10_10 = builder_->createQuadOp(
+          spv::OpBitFieldInsert, type_uint_, packed_2_10_10_10,
+          builder_->createCompositeExtract(color_uint4, type_uint_, i),
+          builder_->makeUintConstant(10 * i), i == 3 ? alpha_width : rgb_width);
+    }
+    builder_->createBranch(&block_format_merge);
+  }
+  spv::Block& block_format_2_10_10_10_end = *builder_->getBuildPoint();
+
+  // ***************************************************************************
+  // k_2_10_10_10_FLOAT
+  // k_2_10_10_10_FLOAT_AS_16_16_16_16
+  // ***************************************************************************
+  spv::Id packed_2_10_10_10_float;
+  {
+    builder_->setBuildPoint(&block_format_2_10_10_10_float);
+    std::array<spv::Id, 4> color_components;
+    // RGB.
+    for (uint32_t i = 0; i < 3; ++i) {
+      color_components[i] = UnclampedFloat32To7e3(
+          *builder_,
+          builder_->createCompositeExtract(color_float4, type_float_, i),
+          ext_inst_glsl_std_450_);
+    }
+    // Alpha.
+    spv::Id alpha_scaled = builder_->createNoContractionBinOp(
+        spv::OpFMul, type_float_,
+        builder_->createTriBuiltinCall(
+            type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp,
+            builder_->createCompositeExtract(color_float4, type_float_, 3),
+            const_float_0_, const_float_1_),
+        builder_->makeFloatConstant(3.0f));
+    spv::Id alpha_offset = builder_->createNoContractionBinOp(
+        spv::OpFAdd, type_float_, alpha_scaled, unorm_round_offset_float);
+    color_components[3] =
+        builder_->createUnaryOp(spv::OpConvertFToU, type_uint_, alpha_offset);
+    // Pack.
+    packed_2_10_10_10_float = color_components[0];
+    spv::Id rgb_width = builder_->makeUintConstant(10);
+    for (uint32_t i = 1; i < 3; ++i) {
+      packed_2_10_10_10_float = builder_->createQuadOp(
+          spv::OpBitFieldInsert, type_uint_, packed_2_10_10_10_float,
+          color_components[i], builder_->makeUintConstant(10 * i), rgb_width);
+    }
+    packed_2_10_10_10_float = builder_->createQuadOp(
+        spv::OpBitFieldInsert, type_uint_, packed_2_10_10_10_float,
+        color_components[3], builder_->makeUintConstant(30),
+        builder_->makeUintConstant(2));
+    builder_->createBranch(&block_format_merge);
+  }
+  spv::Block& block_format_2_10_10_10_float_end = *builder_->getBuildPoint();
+
+  // ***************************************************************************
+  // k_16_16
+  // k_16_16_16_16
+  // ***************************************************************************
+  std::array<spv::Id, 2> packed_16;
+  {
+    builder_->setBuildPoint(&block_format_16);
+    id_vector_temp_.clear();
+    id_vector_temp_.resize(4, builder_->makeFloatConstant(-32.0f));
+    spv::Id const_float4_minus_32 =
+        builder_->makeCompositeConstant(type_float4_, id_vector_temp_);
+    id_vector_temp_.clear();
+    id_vector_temp_.resize(4, builder_->makeFloatConstant(32.0f));
+    spv::Id const_float4_32 =
+        builder_->makeCompositeConstant(type_float4_, id_vector_temp_);
+    id_vector_temp_.clear();
+    // NaN to 0, not to -32.
+    spv::Id color_scaled = builder_->createNoContractionBinOp(
+        spv::OpVectorTimesScalar, type_float4_,
+        builder_->createTriBuiltinCall(
+            type_float4_, ext_inst_glsl_std_450_, GLSLstd450FClamp,
+            builder_->createTriOp(spv::OpSelect, type_float4_,
+                                  builder_->createUnaryOp(
+                                      spv::OpIsNan, type_bool4_, color_float4),
+                                  const_float4_0_, color_float4),
+            const_float4_minus_32, const_float4_32),
+        builder_->makeFloatConstant(32767.0f / 32.0f));
+    id_vector_temp_.clear();
+    id_vector_temp_.resize(4, builder_->makeFloatConstant(-0.5f));
+    spv::Id unorm_round_offset_negative_float4 =
+        builder_->makeCompositeConstant(type_float4_, id_vector_temp_);
+    spv::Id color_offset = builder_->createNoContractionBinOp(
+        spv::OpFAdd, type_float4_, color_scaled,
+        builder_->createTriOp(
+            spv::OpSelect, type_float4_,
+            builder_->createBinOp(spv::OpFOrdLessThan, type_bool4_,
+                                  color_scaled, const_float4_0_),
+            unorm_round_offset_negative_float4, unorm_round_offset_float4));
+    spv::Id color_uint4 = builder_->createUnaryOp(
+        spv::OpBitcast, type_uint4_,
+        builder_->createUnaryOp(spv::OpConvertFToS, type_int4_, color_offset));
+    spv::Id component_offset_width = builder_->makeUintConstant(16);
+    for (uint32_t i = 0; i < 2; ++i) {
+      packed_16[i] = builder_->createQuadOp(
+          spv::OpBitFieldInsert, type_uint_,
+          builder_->createCompositeExtract(color_uint4, type_uint_, 2 * i),
+          builder_->createCompositeExtract(color_uint4, type_uint_, 2 * i + 1),
+          component_offset_width, component_offset_width);
+    }
+    builder_->createBranch(&block_format_merge);
+  }
+  spv::Block& block_format_16_end = *builder_->getBuildPoint();
+
+  // ***************************************************************************
+  // k_16_16_FLOAT
+  // k_16_16_16_16_FLOAT
+  // ***************************************************************************
+  std::array<spv::Id, 2> packed_16_float;
+  {
+    builder_->setBuildPoint(&block_format_16_float);
+    // NaN is flushed to 0 inside PackFloat16x2ExtendedRange.
+    for (uint32_t i = 0; i < 2; ++i) {
+      uint_vector_temp_.clear();
+      uint_vector_temp_.push_back(2 * i);
+      uint_vector_temp_.push_back(2 * i + 1);
+      packed_16_float[i] =
+          PackFloat16x2ExtendedRange(builder_->createRvalueSwizzle(
+              spv::NoPrecision, type_float2_, color_float4, uint_vector_temp_));
+    }
+    builder_->createBranch(&block_format_merge);
+  }
+  spv::Block& block_format_16_float_end = *builder_->getBuildPoint();
+
+  // ***************************************************************************
+  // k_32_FLOAT
+  // k_32_32_FLOAT
+  // ***************************************************************************
+  std::array<spv::Id, 2> packed_32_float;
+  {
+    builder_->setBuildPoint(&block_format_32_float);
+    for (uint32_t i = 0; i < 2; ++i) {
+      packed_32_float[i] = builder_->createUnaryOp(
+          spv::OpBitcast, type_uint_,
+          builder_->createCompositeExtract(color_float4, type_float_, i));
+    }
+    builder_->createBranch(&block_format_merge);
+  }
+  spv::Block& block_format_32_float_end = *builder_->getBuildPoint();
+
+  // ***************************************************************************
+  // Selection of the result depending on the format.
+  // ***************************************************************************
+
+  builder_->setBuildPoint(&block_format_merge);
+  std::array<spv::Id, 2> packed;
+  id_vector_temp_.reserve(2 * 7);
+  // Low 32 bits.
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(packed_8_8_8_8);
+  id_vector_temp_.push_back(block_format_8_8_8_8_end.getId());
+  id_vector_temp_.push_back(packed_8_8_8_8_gamma);
+  id_vector_temp_.push_back(block_format_8_8_8_8_gamma_end.getId());
+  id_vector_temp_.push_back(packed_2_10_10_10);
+  id_vector_temp_.push_back(block_format_2_10_10_10_end.getId());
+  id_vector_temp_.push_back(packed_2_10_10_10_float);
+  id_vector_temp_.push_back(block_format_2_10_10_10_float_end.getId());
+  id_vector_temp_.push_back(packed_16[0]);
+  id_vector_temp_.push_back(block_format_16_end.getId());
+  id_vector_temp_.push_back(packed_16_float[0]);
+  id_vector_temp_.push_back(block_format_16_float_end.getId());
+  id_vector_temp_.push_back(packed_32_float[0]);
+  id_vector_temp_.push_back(block_format_32_float_end.getId());
+  packed[0] = builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+  // High 32 bits.
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(const_uint_0_);
+  id_vector_temp_.push_back(block_format_8_8_8_8_end.getId());
+  id_vector_temp_.push_back(const_uint_0_);
+  id_vector_temp_.push_back(block_format_8_8_8_8_gamma_end.getId());
+  id_vector_temp_.push_back(const_uint_0_);
+  id_vector_temp_.push_back(block_format_2_10_10_10_end.getId());
+  id_vector_temp_.push_back(const_uint_0_);
+  id_vector_temp_.push_back(block_format_2_10_10_10_float_end.getId());
+  id_vector_temp_.push_back(packed_16[1]);
+  id_vector_temp_.push_back(block_format_16_end.getId());
+  id_vector_temp_.push_back(packed_16_float[1]);
+  id_vector_temp_.push_back(block_format_16_float_end.getId());
+  id_vector_temp_.push_back(packed_32_float[1]);
+  id_vector_temp_.push_back(block_format_32_float_end.getId());
+  packed[1] = builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+  return packed;
+}
+
+std::array<spv::Id, 4> SpirvShaderTranslator::FSI_UnpackColor(
+    std::array<spv::Id, 2> color_packed, spv::Id format_with_flags) {
+  spv::Block& block_format_head = *builder_->getBuildPoint();
+  spv::Block& block_format_8_8_8_8 = builder_->makeNewBlock();
+  spv::Block& block_format_8_8_8_8_gamma = builder_->makeNewBlock();
+  spv::Block& block_format_2_10_10_10 = builder_->makeNewBlock();
+  spv::Block& block_format_2_10_10_10_float = builder_->makeNewBlock();
+  spv::Block& block_format_16_16 = builder_->makeNewBlock();
+  spv::Block& block_format_16_16_16_16 = builder_->makeNewBlock();
+  spv::Block& block_format_16_16_float = builder_->makeNewBlock();
+  spv::Block& block_format_16_16_16_16_float = builder_->makeNewBlock();
+  spv::Block& block_format_32_float = builder_->makeNewBlock();
+  spv::Block& block_format_32_32_float = builder_->makeNewBlock();
+  spv::Block& block_format_merge = builder_->makeNewBlock();
+  builder_->createSelectionMerge(&block_format_merge,
+                                 spv::SelectionControlDontFlattenMask);
+  {
+    std::unique_ptr<spv::Instruction> format_switch_op =
+        std::make_unique<spv::Instruction>(spv::OpSwitch);
+    format_switch_op->addIdOperand(format_with_flags);
+    // Make k_32_FLOAT the default.
+    format_switch_op->addIdOperand(block_format_32_float.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_8_8_8_8)));
+    format_switch_op->addIdOperand(block_format_8_8_8_8.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA)));
+    format_switch_op->addIdOperand(block_format_8_8_8_8_gamma.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_2_10_10_10)));
+    format_switch_op->addIdOperand(block_format_2_10_10_10.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10)));
+    format_switch_op->addIdOperand(block_format_2_10_10_10.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT)));
+    format_switch_op->addIdOperand(block_format_2_10_10_10_float.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat ::
+                k_2_10_10_10_FLOAT_AS_16_16_16_16)));
+    format_switch_op->addIdOperand(block_format_2_10_10_10_float.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_16_16)));
+    format_switch_op->addIdOperand(block_format_16_16.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_16_16_16_16)));
+    format_switch_op->addIdOperand(block_format_16_16_16_16.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_16_16_FLOAT)));
+    format_switch_op->addIdOperand(block_format_16_16_float.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT)));
+    format_switch_op->addIdOperand(block_format_16_16_16_16_float.getId());
+    format_switch_op->addImmediateOperand(
+        int32_t(RenderTargetCache::AddPSIColorFormatFlags(
+            xenos::ColorRenderTargetFormat::k_32_32_FLOAT)));
+    format_switch_op->addIdOperand(block_format_32_32_float.getId());
+    builder_->getBuildPoint()->addInstruction(std::move(format_switch_op));
+  }
+  block_format_8_8_8_8.addPredecessor(&block_format_head);
+  block_format_8_8_8_8_gamma.addPredecessor(&block_format_head);
+  block_format_2_10_10_10.addPredecessor(&block_format_head);
+  block_format_2_10_10_10_float.addPredecessor(&block_format_head);
+  block_format_16_16.addPredecessor(&block_format_head);
+  block_format_16_16_16_16.addPredecessor(&block_format_head);
+  block_format_16_16_float.addPredecessor(&block_format_head);
+  block_format_16_16_16_16_float.addPredecessor(&block_format_head);
+  block_format_32_float.addPredecessor(&block_format_head);
+  block_format_32_32_float.addPredecessor(&block_format_head);
+
+  // ***************************************************************************
+  // k_8_8_8_8
+  // k_8_8_8_8_GAMMA
+  // ***************************************************************************
+
+  std::array<std::array<spv::Id, 4>, 2> unpacked_8_8_8_8_and_gamma;
+  std::array<spv::Block*, 2> block_format_8_8_8_8_and_gamma_end;
+  {
+    spv::Id component_width = builder_->makeUintConstant(8);
+    spv::Id component_scale = builder_->makeFloatConstant(1.0f / 255.0f);
+    for (uint32_t i = 0; i < 2; ++i) {
+      builder_->setBuildPoint(i ? &block_format_8_8_8_8_gamma
+                                : &block_format_8_8_8_8);
+      for (uint32_t j = 0; j < 4; ++j) {
+        spv::Id component = builder_->createNoContractionBinOp(
+            spv::OpFMul, type_float_,
+            builder_->createUnaryOp(
+                spv::OpConvertUToF, type_float_,
+                builder_->createTriOp(
+                    spv::OpBitFieldUExtract, type_uint_, color_packed[0],
+                    builder_->makeUintConstant(8 * j), component_width)),
+            component_scale);
+        if (i && j <= 2) {
+          component = SpirvShaderTranslator::PWLGammaToLinear(
+              builder_.get(), component, true, ext_inst_glsl_std_450_);
+        }
+        unpacked_8_8_8_8_and_gamma[i][j] = component;
+      }
+      builder_->createBranch(&block_format_merge);
+      block_format_8_8_8_8_and_gamma_end[i] = builder_->getBuildPoint();
+    }
+  }
+
+  // ***************************************************************************
+  // k_2_10_10_10
+  // k_2_10_10_10_AS_10_10_10_10
+  // ***************************************************************************
+
+  std::array<spv::Id, 4> unpacked_2_10_10_10;
+  {
+    builder_->setBuildPoint(&block_format_2_10_10_10);
+    spv::Id rgb_width = builder_->makeUintConstant(10);
+    spv::Id alpha_width = builder_->makeUintConstant(2);
+    spv::Id rgb_scale = builder_->makeFloatConstant(1.0f / 1023.0f);
+    spv::Id alpha_scale = builder_->makeFloatConstant(1.0f / 3.0f);
+    for (uint32_t i = 0; i < 4; ++i) {
+      unpacked_2_10_10_10[i] = builder_->createNoContractionBinOp(
+          spv::OpFMul, type_float_,
+          builder_->createUnaryOp(
+              spv::OpConvertUToF, type_float_,
+              builder_->createTriOp(spv::OpBitFieldUExtract, type_uint_,
+                                    color_packed[0],
+                                    builder_->makeUintConstant(10 * i),
+                                    i == 3 ? alpha_width : rgb_width)),
+          i == 3 ? alpha_scale : rgb_scale);
+    }
+    builder_->createBranch(&block_format_merge);
+  }
+  spv::Block& block_format_2_10_10_10_end = *builder_->getBuildPoint();
+
+  // ***************************************************************************
+  // k_2_10_10_10_FLOAT
+  // k_2_10_10_10_FLOAT_AS_16_16_16_16
+  // ***************************************************************************
+
+  std::array<spv::Id, 4> unpacked_2_10_10_10_float;
+  {
+    builder_->setBuildPoint(&block_format_2_10_10_10_float);
+    spv::Id rgb_width = builder_->makeUintConstant(10);
+    for (uint32_t i = 0; i < 3; ++i) {
+      unpacked_2_10_10_10_float[i] =
+          Float7e3To32(*builder_,
+                       builder_->createTriOp(
+                           spv::OpBitFieldUExtract, type_uint_, color_packed[0],
+                           builder_->makeUintConstant(10 * i), rgb_width),
+                       0, false, ext_inst_glsl_std_450_);
+    }
+    unpacked_2_10_10_10_float[3] = builder_->createNoContractionBinOp(
+        spv::OpFMul, type_float_,
+        builder_->createUnaryOp(
+            spv::OpConvertUToF, type_float_,
+            builder_->createTriOp(
+                spv::OpBitFieldUExtract, type_uint_, color_packed[0],
+                builder_->makeUintConstant(30), builder_->makeUintConstant(2))),
+        builder_->makeFloatConstant(1.0f / 3.0f));
+    builder_->createBranch(&block_format_merge);
+  }
+  spv::Block& block_format_2_10_10_10_float_end = *builder_->getBuildPoint();
+
+  // ***************************************************************************
+  // k_16_16
+  // k_16_16_16_16
+  // ***************************************************************************
+
+  std::array<std::array<spv::Id, 4>, 2> unpacked_16;
+  unpacked_16[0][2] = const_float_0_;
+  unpacked_16[0][3] = const_float_1_;
+  std::array<spv::Block*, 2> block_format_16_end;
+  {
+    spv::Id component_width = builder_->makeUintConstant(16);
+    spv::Id component_scale = builder_->makeFloatConstant(32.0f / 32767.0f);
+    spv::Id component_min = builder_->makeFloatConstant(-1.0f);
+    for (uint32_t i = 0; i < 2; ++i) {
+      builder_->setBuildPoint(i ? &block_format_16_16_16_16
+                                : &block_format_16_16);
+      std::array<spv::Id, 2> color_packed_signed;
+      for (uint32_t j = 0; j <= i; ++j) {
+        color_packed_signed[j] =
+            builder_->createUnaryOp(spv::OpBitcast, type_int_, color_packed[j]);
+      }
+      for (uint32_t j = 0; j < uint32_t(i ? 4 : 2); ++j) {
+        spv::Id component = builder_->createNoContractionBinOp(
+            spv::OpFMul, type_float_,
+            builder_->createUnaryOp(
+                spv::OpConvertSToF, type_float_,
+                builder_->createTriOp(spv::OpBitFieldSExtract, type_int_,
+                                      color_packed_signed[j >> 1],
+                                      builder_->makeUintConstant(16 * (j & 1)),
+                                      component_width)),
+            component_scale);
+        component = builder_->createBinBuiltinCall(
+            type_float_, ext_inst_glsl_std_450_, GLSLstd450FMax, component_min,
+            component);
+        unpacked_16[i][j] = component;
+      }
+      builder_->createBranch(&block_format_merge);
+      block_format_16_end[i] = builder_->getBuildPoint();
+    }
+  }
+
+  // ***************************************************************************
+  // k_16_16_FLOAT
+  // k_16_16_16_16_FLOAT
+  // ***************************************************************************
+
+  std::array<std::array<spv::Id, 4>, 2> unpacked_16_float;
+  unpacked_16_float[0][2] = const_float_0_;
+  unpacked_16_float[0][3] = const_float_1_;
+  std::array<spv::Block*, 2> block_format_16_float_end;
+  {
+    for (uint32_t i = 0; i < 2; ++i) {
+      builder_->setBuildPoint(i ? &block_format_16_16_16_16_float
+                                : &block_format_16_16_float);
+      for (uint32_t j = 0; j <= i; ++j) {
+        spv::Id components_float2 =
+            UnpackFloat16x2ExtendedRange(color_packed[j]);
+        for (uint32_t k = 0; k < 2; ++k) {
+          unpacked_16_float[i][2 * j + k] = builder_->createCompositeExtract(
+              components_float2, type_float_, k);
+        }
+      }
+      builder_->createBranch(&block_format_merge);
+      block_format_16_float_end[i] = builder_->getBuildPoint();
+    }
+  }
+
+  // ***************************************************************************
+  // k_32_FLOAT
+  // k_32_32_FLOAT
+  // ***************************************************************************
+
+  std::array<std::array<spv::Id, 4>, 2> unpacked_32_float;
+  unpacked_32_float[0][1] = const_float_0_;
+  unpacked_32_float[0][2] = const_float_0_;
+  unpacked_32_float[0][3] = const_float_1_;
+  unpacked_32_float[1][2] = const_float_0_;
+  unpacked_32_float[1][3] = const_float_1_;
+  std::array<spv::Block*, 2> block_format_32_float_end;
+  {
+    for (uint32_t i = 0; i < 2; ++i) {
+      builder_->setBuildPoint(i ? &block_format_32_32_float
+                                : &block_format_32_float);
+      for (uint32_t j = 0; j <= i; ++j) {
+        unpacked_32_float[i][j] = builder_->createUnaryOp(
+            spv::OpBitcast, type_float_, color_packed[j]);
+      }
+      builder_->createBranch(&block_format_merge);
+      block_format_32_float_end[i] = builder_->getBuildPoint();
+    }
+  }
+
+  // ***************************************************************************
+  // Selection of the result depending on the format.
+  // ***************************************************************************
+
+  builder_->setBuildPoint(&block_format_merge);
+  std::array<spv::Id, 4> unpacked;
+  id_vector_temp_.reserve(2 * 10);
+  for (uint32_t i = 0; i < 4; ++i) {
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(unpacked_8_8_8_8_and_gamma[0][i]);
+    id_vector_temp_.push_back(block_format_8_8_8_8_and_gamma_end[0]->getId());
+    id_vector_temp_.push_back(unpacked_8_8_8_8_and_gamma[1][i]);
+    id_vector_temp_.push_back(block_format_8_8_8_8_and_gamma_end[1]->getId());
+    id_vector_temp_.push_back(unpacked_2_10_10_10[i]);
+    id_vector_temp_.push_back(block_format_2_10_10_10_end.getId());
+    id_vector_temp_.push_back(unpacked_2_10_10_10_float[i]);
+    id_vector_temp_.push_back(block_format_2_10_10_10_float_end.getId());
+    id_vector_temp_.push_back(unpacked_16[0][i]);
+    id_vector_temp_.push_back(block_format_16_end[0]->getId());
+    id_vector_temp_.push_back(unpacked_16[1][i]);
+    id_vector_temp_.push_back(block_format_16_end[1]->getId());
+    id_vector_temp_.push_back(unpacked_16_float[0][i]);
+    id_vector_temp_.push_back(block_format_16_float_end[0]->getId());
+    id_vector_temp_.push_back(unpacked_16_float[1][i]);
+    id_vector_temp_.push_back(block_format_16_float_end[1]->getId());
+    id_vector_temp_.push_back(unpacked_32_float[0][i]);
+    id_vector_temp_.push_back(block_format_32_float_end[0]->getId());
+    id_vector_temp_.push_back(unpacked_32_float[1][i]);
+    id_vector_temp_.push_back(block_format_32_float_end[1]->getId());
+    unpacked[i] = builder_->createOp(spv::OpPhi, type_float_, id_vector_temp_);
+  }
+  return unpacked;
+}
+
+spv::Id SpirvShaderTranslator::FSI_FlushNaNClampAndInBlending(
+    spv::Id color_or_alpha, spv::Id is_fixed_point, spv::Id min_value,
+    spv::Id max_value) {
+  spv::Id color_or_alpha_type = builder_->getTypeId(color_or_alpha);
+  uint32_t component_count =
+      uint32_t(builder_->getNumTypeConstituents(color_or_alpha_type));
+  assert_true(builder_->isScalarType(color_or_alpha_type) ||
+              builder_->isVectorType(color_or_alpha_type));
+  assert_true(
+      builder_->isFloatType(builder_->getScalarTypeId(color_or_alpha_type)));
+  assert_true(builder_->getTypeId(min_value) == color_or_alpha_type);
+  assert_true(builder_->getTypeId(max_value) == color_or_alpha_type);
+
+  SpirvBuilder::IfBuilder if_fixed_point(
+      is_fixed_point, spv::SelectionControlDontFlattenMask, *builder_);
+  spv::Id color_or_alpha_clamped;
+  {
+    // Flush NaN to 0 even for signed (NMax would flush it to the minimum
+    // value).
+    color_or_alpha_clamped = builder_->createTriBuiltinCall(
+        color_or_alpha_type, ext_inst_glsl_std_450_, GLSLstd450FClamp,
+        builder_->createTriOp(
+            spv::OpSelect, color_or_alpha_type,
+            builder_->createUnaryOp(spv::OpIsNan,
+                                    type_bool_vectors_[component_count - 1],
+                                    color_or_alpha),
+            const_float_vectors_0_[component_count - 1], color_or_alpha),
+        min_value, max_value);
+  }
+  if_fixed_point.makeEndIf();
+
+  return if_fixed_point.createMergePhi(color_or_alpha_clamped, color_or_alpha);
+}
+
+spv::Id SpirvShaderTranslator::FSI_ApplyColorBlendFactor(
+    spv::Id value, spv::Id is_fixed_point, spv::Id clamp_min_value,
+    spv::Id clamp_max_value, spv::Id factor, spv::Id source_color,
+    spv::Id source_alpha, spv::Id dest_color, spv::Id dest_alpha,
+    spv::Id constant_color, spv::Id constant_alpha) {
+  // If the factor is zero, don't use it in the multiplication at all, so that
+  // infinity and NaN are not potentially involved in the multiplication.
+  // Calculate the condition before the selection merge, which must be the
+  // penultimate instruction in the block.
+  SpirvBuilder::IfBuilder factor_not_zero_if(
+      builder_->createBinOp(
+          spv::OpINotEqual, type_bool_, factor,
+          builder_->makeUintConstant(uint32_t(xenos::BlendFactor::kZero))),
+      spv::SelectionControlDontFlattenMask, *builder_);
+
+  // Non-zero factor case.
+
+  spv::Block& block_factor_head = *builder_->getBuildPoint();
+  spv::Block& block_factor_one = builder_->makeNewBlock();
+  std::array<spv::Block*, 3> color_factor_blocks;
+  std::array<spv::Block*, 3> one_minus_color_factor_blocks;
+  std::array<spv::Block*, 3> alpha_factor_blocks;
+  std::array<spv::Block*, 3> one_minus_alpha_factor_blocks;
+  color_factor_blocks[0] = &builder_->makeNewBlock();
+  one_minus_color_factor_blocks[0] = &builder_->makeNewBlock();
+  alpha_factor_blocks[0] = &builder_->makeNewBlock();
+  one_minus_alpha_factor_blocks[0] = &builder_->makeNewBlock();
+  color_factor_blocks[1] = &builder_->makeNewBlock();
+  one_minus_color_factor_blocks[1] = &builder_->makeNewBlock();
+  alpha_factor_blocks[1] = &builder_->makeNewBlock();
+  one_minus_alpha_factor_blocks[1] = &builder_->makeNewBlock();
+  color_factor_blocks[2] = &builder_->makeNewBlock();
+  one_minus_color_factor_blocks[2] = &builder_->makeNewBlock();
+  alpha_factor_blocks[2] = &builder_->makeNewBlock();
+  one_minus_alpha_factor_blocks[2] = &builder_->makeNewBlock();
+  spv::Block& block_factor_source_alpha_saturate = builder_->makeNewBlock();
+  spv::Block& block_factor_merge = builder_->makeNewBlock();
+  builder_->createSelectionMerge(&block_factor_merge,
+                                 spv::SelectionControlDontFlattenMask);
+  {
+    std::unique_ptr<spv::Instruction> factor_switch_op =
+        std::make_unique<spv::Instruction>(spv::OpSwitch);
+    factor_switch_op->addIdOperand(factor);
+    // Make one the default factor.
+    factor_switch_op->addIdOperand(block_factor_one.getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kSrcColor));
+    factor_switch_op->addIdOperand(color_factor_blocks[0]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kOneMinusSrcColor));
+    factor_switch_op->addIdOperand(one_minus_color_factor_blocks[0]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kSrcAlpha));
+    factor_switch_op->addIdOperand(alpha_factor_blocks[0]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kOneMinusSrcAlpha));
+    factor_switch_op->addIdOperand(one_minus_alpha_factor_blocks[0]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kDstColor));
+    factor_switch_op->addIdOperand(color_factor_blocks[1]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kOneMinusDstColor));
+    factor_switch_op->addIdOperand(one_minus_color_factor_blocks[1]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kDstAlpha));
+    factor_switch_op->addIdOperand(alpha_factor_blocks[1]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kOneMinusDstAlpha));
+    factor_switch_op->addIdOperand(one_minus_alpha_factor_blocks[1]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kConstantColor));
+    factor_switch_op->addIdOperand(color_factor_blocks[2]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kOneMinusConstantColor));
+    factor_switch_op->addIdOperand(one_minus_color_factor_blocks[2]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kConstantAlpha));
+    factor_switch_op->addIdOperand(alpha_factor_blocks[2]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kOneMinusConstantAlpha));
+    factor_switch_op->addIdOperand(one_minus_alpha_factor_blocks[2]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kSrcAlphaSaturate));
+    factor_switch_op->addIdOperand(block_factor_source_alpha_saturate.getId());
+    builder_->getBuildPoint()->addInstruction(std::move(factor_switch_op));
+  }
+  block_factor_one.addPredecessor(&block_factor_head);
+  for (uint32_t i = 0; i < 3; ++i) {
+    color_factor_blocks[i]->addPredecessor(&block_factor_head);
+    one_minus_color_factor_blocks[i]->addPredecessor(&block_factor_head);
+    alpha_factor_blocks[i]->addPredecessor(&block_factor_head);
+    one_minus_alpha_factor_blocks[i]->addPredecessor(&block_factor_head);
+  }
+  block_factor_source_alpha_saturate.addPredecessor(&block_factor_head);
+
+  // kOne
+  builder_->setBuildPoint(&block_factor_one);
+  // The result is the value itself.
+  builder_->createBranch(&block_factor_merge);
+
+  // k[OneMinus]Src/Dest/ConstantColor/Alpha
+  std::array<spv::Id, 3> color_factors = {
+      source_color,
+      dest_color,
+      constant_color,
+  };
+  std::array<spv::Id, 3> alpha_factors = {
+      source_alpha,
+      dest_alpha,
+      constant_alpha,
+  };
+  std::array<spv::Id, 3> color_factor_results;
+  std::array<spv::Id, 3> one_minus_color_factor_results;
+  std::array<spv::Id, 3> alpha_factor_results;
+  std::array<spv::Id, 3> one_minus_alpha_factor_results;
+  for (uint32_t i = 0; i < 3; ++i) {
+    spv::Id color_factor = color_factors[i];
+    spv::Id alpha_factor = alpha_factors[i];
+
+    // kSrc/Dst/ConstantColor
+    {
+      builder_->setBuildPoint(color_factor_blocks[i]);
+      color_factor_results[i] = builder_->createNoContractionBinOp(
+          spv::OpFMul, type_float3_, value, color_factor);
+      builder_->createBranch(&block_factor_merge);
+    }
+
+    // kOneMinusSrc/Dst/ConstantColor
+    {
+      builder_->setBuildPoint(one_minus_color_factor_blocks[i]);
+      one_minus_color_factor_results[i] = builder_->createNoContractionBinOp(
+          spv::OpFMul, type_float3_, value,
+          builder_->createNoContractionBinOp(spv::OpFSub, type_float3_,
+                                             const_float3_1_, color_factor));
+      builder_->createBranch(&block_factor_merge);
+    }
+
+    // kSrc/Dst/ConstantAlpha
+    {
+      builder_->setBuildPoint(alpha_factor_blocks[i]);
+      alpha_factor_results[i] = builder_->createNoContractionBinOp(
+          spv::OpVectorTimesScalar, type_float3_, value, alpha_factor);
+      builder_->createBranch(&block_factor_merge);
+    }
+
+    // kOneMinusSrc/Dst/ConstantAlpha
+    {
+      builder_->setBuildPoint(one_minus_alpha_factor_blocks[i]);
+      one_minus_alpha_factor_results[i] = builder_->createNoContractionBinOp(
+          spv::OpVectorTimesScalar, type_float3_, value,
+          builder_->createNoContractionBinOp(spv::OpFSub, type_float_,
+                                             const_float_1_, alpha_factor));
+      builder_->createBranch(&block_factor_merge);
+    }
+  }
+
+  // kSrcAlphaSaturate
+  spv::Id result_source_alpha_saturate;
+  {
+    builder_->setBuildPoint(&block_factor_source_alpha_saturate);
+    result_source_alpha_saturate = builder_->createNoContractionBinOp(
+        spv::OpVectorTimesScalar, type_float3_, value,
+        builder_->createBinBuiltinCall(
+            type_float_, ext_inst_glsl_std_450_, GLSLstd450NMin, source_alpha,
+            builder_->createNoContractionBinOp(spv::OpFSub, type_float_,
+                                               const_float_1_, dest_alpha)));
+    builder_->createBranch(&block_factor_merge);
+  }
+
+  // Select the term for the non-zero factor.
+  builder_->setBuildPoint(&block_factor_merge);
+  id_vector_temp_.clear();
+  id_vector_temp_.reserve(2 * 14);
+  id_vector_temp_.push_back(value);
+  id_vector_temp_.push_back(block_factor_one.getId());
+  for (uint32_t i = 0; i < 3; ++i) {
+    id_vector_temp_.push_back(color_factor_results[i]);
+    id_vector_temp_.push_back(color_factor_blocks[i]->getId());
+    id_vector_temp_.push_back(one_minus_color_factor_results[i]);
+    id_vector_temp_.push_back(one_minus_color_factor_blocks[i]->getId());
+    id_vector_temp_.push_back(alpha_factor_results[i]);
+    id_vector_temp_.push_back(alpha_factor_blocks[i]->getId());
+    id_vector_temp_.push_back(one_minus_alpha_factor_results[i]);
+    id_vector_temp_.push_back(one_minus_alpha_factor_blocks[i]->getId());
+  }
+  id_vector_temp_.push_back(result_source_alpha_saturate);
+  id_vector_temp_.push_back(block_factor_source_alpha_saturate.getId());
+  spv::Id result_unclamped =
+      builder_->createOp(spv::OpPhi, type_float3_, id_vector_temp_);
+  spv::Id result = FSI_FlushNaNClampAndInBlending(
+      result_unclamped, is_fixed_point, clamp_min_value, clamp_max_value);
+
+  factor_not_zero_if.makeEndIf();
+
+  // Make the result zero if the factor is zero.
+  return factor_not_zero_if.createMergePhi(result, const_float3_0_);
+}
+
+spv::Id SpirvShaderTranslator::FSI_ApplyAlphaBlendFactor(
+    spv::Id value, spv::Id is_fixed_point, spv::Id clamp_min_value,
+    spv::Id clamp_max_value, spv::Id factor, spv::Id source_alpha,
+    spv::Id dest_alpha, spv::Id constant_alpha) {
+  // If the factor is zero, don't use it in the multiplication at all, so that
+  // infinity and NaN are not potentially involved in the multiplication.
+  // Calculate the condition before the selection merge, which must be the
+  // penultimate instruction in the block.
+  SpirvBuilder::IfBuilder factor_not_zero_if(
+      builder_->createBinOp(
+          spv::OpINotEqual, type_bool_, factor,
+          builder_->makeUintConstant(uint32_t(xenos::BlendFactor::kZero))),
+      spv::SelectionControlDontFlattenMask, *builder_);
+
+  // Non-zero factor case.
+
+  spv::Block& block_factor_head = *builder_->getBuildPoint();
+  spv::Block& block_factor_one = builder_->makeNewBlock();
+  std::array<spv::Block*, 3> alpha_factor_blocks;
+  std::array<spv::Block*, 3> one_minus_alpha_factor_blocks;
+  alpha_factor_blocks[0] = &builder_->makeNewBlock();
+  one_minus_alpha_factor_blocks[0] = &builder_->makeNewBlock();
+  alpha_factor_blocks[1] = &builder_->makeNewBlock();
+  one_minus_alpha_factor_blocks[1] = &builder_->makeNewBlock();
+  alpha_factor_blocks[2] = &builder_->makeNewBlock();
+  one_minus_alpha_factor_blocks[2] = &builder_->makeNewBlock();
+  spv::Block& block_factor_source_alpha_saturate = builder_->makeNewBlock();
+  spv::Block& block_factor_merge = builder_->makeNewBlock();
+  builder_->createSelectionMerge(&block_factor_merge,
+                                 spv::SelectionControlDontFlattenMask);
+  {
+    std::unique_ptr<spv::Instruction> factor_switch_op =
+        std::make_unique<spv::Instruction>(spv::OpSwitch);
+    factor_switch_op->addIdOperand(factor);
+    // Make one the default factor.
+    factor_switch_op->addIdOperand(block_factor_one.getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kSrcColor));
+    factor_switch_op->addIdOperand(alpha_factor_blocks[0]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kOneMinusSrcColor));
+    factor_switch_op->addIdOperand(one_minus_alpha_factor_blocks[0]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kSrcAlpha));
+    factor_switch_op->addIdOperand(alpha_factor_blocks[0]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kOneMinusSrcAlpha));
+    factor_switch_op->addIdOperand(one_minus_alpha_factor_blocks[0]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kDstColor));
+    factor_switch_op->addIdOperand(alpha_factor_blocks[1]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kOneMinusDstColor));
+    factor_switch_op->addIdOperand(one_minus_alpha_factor_blocks[1]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kDstAlpha));
+    factor_switch_op->addIdOperand(alpha_factor_blocks[1]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kOneMinusDstAlpha));
+    factor_switch_op->addIdOperand(one_minus_alpha_factor_blocks[1]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kConstantColor));
+    factor_switch_op->addIdOperand(alpha_factor_blocks[2]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kOneMinusConstantColor));
+    factor_switch_op->addIdOperand(one_minus_alpha_factor_blocks[2]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kConstantAlpha));
+    factor_switch_op->addIdOperand(alpha_factor_blocks[2]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kOneMinusConstantAlpha));
+    factor_switch_op->addIdOperand(one_minus_alpha_factor_blocks[2]->getId());
+    factor_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendFactor::kSrcAlphaSaturate));
+    factor_switch_op->addIdOperand(block_factor_source_alpha_saturate.getId());
+    builder_->getBuildPoint()->addInstruction(std::move(factor_switch_op));
+  }
+  block_factor_one.addPredecessor(&block_factor_head);
+  for (uint32_t i = 0; i < 3; ++i) {
+    alpha_factor_blocks[i]->addPredecessor(&block_factor_head);
+    one_minus_alpha_factor_blocks[i]->addPredecessor(&block_factor_head);
+  }
+  block_factor_source_alpha_saturate.addPredecessor(&block_factor_head);
+
+  // kOne
+  builder_->setBuildPoint(&block_factor_one);
+  // The result is the value itself.
+  builder_->createBranch(&block_factor_merge);
+
+  // k[OneMinus]Src/Dest/ConstantColor/Alpha
+  std::array<spv::Id, 3> alpha_factors = {
+      source_alpha,
+      dest_alpha,
+      constant_alpha,
+  };
+  std::array<spv::Id, 3> alpha_factor_results;
+  std::array<spv::Id, 3> one_minus_alpha_factor_results;
+  for (uint32_t i = 0; i < 3; ++i) {
+    spv::Id alpha_factor = alpha_factors[i];
+
+    // kSrc/Dst/ConstantColor/Alpha
+    {
+      builder_->setBuildPoint(alpha_factor_blocks[i]);
+      alpha_factor_results[i] = builder_->createNoContractionBinOp(
+          spv::OpFMul, type_float_, value, alpha_factor);
+      builder_->createBranch(&block_factor_merge);
+    }
+
+    // kOneMinusSrc/Dst/ConstantColor/Alpha
+    {
+      builder_->setBuildPoint(one_minus_alpha_factor_blocks[i]);
+      one_minus_alpha_factor_results[i] = builder_->createNoContractionBinOp(
+          spv::OpFMul, type_float_, value,
+          builder_->createNoContractionBinOp(spv::OpFSub, type_float_,
+                                             const_float_1_, alpha_factor));
+      builder_->createBranch(&block_factor_merge);
+    }
+  }
+
+  // kSrcAlphaSaturate
+  spv::Id result_source_alpha_saturate;
+  {
+    builder_->setBuildPoint(&block_factor_source_alpha_saturate);
+    result_source_alpha_saturate = builder_->createNoContractionBinOp(
+        spv::OpFMul, type_float_, value,
+        builder_->createBinBuiltinCall(
+            type_float_, ext_inst_glsl_std_450_, GLSLstd450NMin, source_alpha,
+            builder_->createNoContractionBinOp(spv::OpFSub, type_float_,
+                                               const_float_1_, dest_alpha)));
+    builder_->createBranch(&block_factor_merge);
+  }
+
+  // Select the term for the non-zero factor.
+  builder_->setBuildPoint(&block_factor_merge);
+  id_vector_temp_.clear();
+  id_vector_temp_.reserve(2 * 8);
+  id_vector_temp_.push_back(value);
+  id_vector_temp_.push_back(block_factor_one.getId());
+  for (uint32_t i = 0; i < 3; ++i) {
+    id_vector_temp_.push_back(alpha_factor_results[i]);
+    id_vector_temp_.push_back(alpha_factor_blocks[i]->getId());
+    id_vector_temp_.push_back(one_minus_alpha_factor_results[i]);
+    id_vector_temp_.push_back(one_minus_alpha_factor_blocks[i]->getId());
+  }
+  id_vector_temp_.push_back(result_source_alpha_saturate);
+  id_vector_temp_.push_back(block_factor_source_alpha_saturate.getId());
+  spv::Id result_unclamped =
+      builder_->createOp(spv::OpPhi, type_float_, id_vector_temp_);
+  spv::Id result = FSI_FlushNaNClampAndInBlending(
+      result_unclamped, is_fixed_point, clamp_min_value, clamp_max_value);
+
+  factor_not_zero_if.makeEndIf();
+
+  // Make the result zero if the factor is zero.
+  return factor_not_zero_if.createMergePhi(result, const_float_0_);
+}
+
+spv::Id SpirvShaderTranslator::FSI_BlendColorOrAlphaWithUnclampedResult(
+    spv::Id is_fixed_point, spv::Id clamp_min_value, spv::Id clamp_max_value,
+    spv::Id source_color_clamped, spv::Id source_alpha_clamped,
+    spv::Id dest_color, spv::Id dest_alpha, spv::Id constant_color_clamped,
+    spv::Id constant_alpha_clamped, spv::Id equation, spv::Id source_factor,
+    spv::Id dest_factor) {
+  bool is_alpha = source_color_clamped == spv::NoResult;
+  assert_false(!is_alpha && (dest_color == spv::NoResult ||
+                             constant_color_clamped == spv::NoResult));
+  assert_false(is_alpha && (dest_color != spv::NoResult ||
+                            constant_color_clamped != spv::NoResult));
+  spv::Id value_type = is_alpha ? type_float_ : type_float3_;
+
+  // Apply blend factors to source and destination first.
+  // Note: Unlike Vulkan's VK_BLEND_OP_MIN/MAX which ignore blend factors,
+  // the Xbox 360 applies blend factors before the min/max operation.
+  // So we apply factors unconditionally, then switch on the equation.
+  spv::Id term_source, term_dest;
+  if (is_alpha) {
+    term_source = FSI_ApplyAlphaBlendFactor(
+        source_alpha_clamped, is_fixed_point, clamp_min_value, clamp_max_value,
+        source_factor, source_alpha_clamped, dest_alpha,
+        constant_alpha_clamped);
+    term_dest = FSI_ApplyAlphaBlendFactor(
+        dest_alpha, is_fixed_point, clamp_min_value, clamp_max_value,
+        dest_factor, source_alpha_clamped, dest_alpha, constant_alpha_clamped);
+  } else {
+    term_source = FSI_ApplyColorBlendFactor(
+        source_color_clamped, is_fixed_point, clamp_min_value, clamp_max_value,
+        source_factor, source_color_clamped, source_alpha_clamped, dest_color,
+        dest_alpha, constant_color_clamped, constant_alpha_clamped);
+    term_dest = FSI_ApplyColorBlendFactor(
+        dest_color, is_fixed_point, clamp_min_value, clamp_max_value,
+        dest_factor, source_color_clamped, source_alpha_clamped, dest_color,
+        dest_alpha, constant_color_clamped, constant_alpha_clamped);
+  }
+
+  // Now switch on the blend equation to combine the factored terms.
+  spv::Block& block_equation_head = *builder_->getBuildPoint();
+  spv::Block& block_equation_add = builder_->makeNewBlock();
+  spv::Block& block_equation_subtract = builder_->makeNewBlock();
+  spv::Block& block_equation_rev_subtract = builder_->makeNewBlock();
+  spv::Block& block_equation_min = builder_->makeNewBlock();
+  spv::Block& block_equation_max = builder_->makeNewBlock();
+  spv::Block& block_equation_merge = builder_->makeNewBlock();
+  builder_->createSelectionMerge(&block_equation_merge,
+                                 spv::SelectionControlDontFlattenMask);
+  {
+    std::unique_ptr<spv::Instruction> equation_switch_op =
+        std::make_unique<spv::Instruction>(spv::OpSwitch);
+    equation_switch_op->addIdOperand(equation);
+    // Make addition the default.
+    equation_switch_op->addIdOperand(block_equation_add.getId());
+    equation_switch_op->addImmediateOperand(int32_t(xenos::BlendOp::kSubtract));
+    equation_switch_op->addIdOperand(block_equation_subtract.getId());
+    equation_switch_op->addImmediateOperand(
+        int32_t(xenos::BlendOp::kRevSubtract));
+    equation_switch_op->addIdOperand(block_equation_rev_subtract.getId());
+    equation_switch_op->addImmediateOperand(int32_t(xenos::BlendOp::kMin));
+    equation_switch_op->addIdOperand(block_equation_min.getId());
+    equation_switch_op->addImmediateOperand(int32_t(xenos::BlendOp::kMax));
+    equation_switch_op->addIdOperand(block_equation_max.getId());
+    builder_->getBuildPoint()->addInstruction(std::move(equation_switch_op));
+  }
+  block_equation_add.addPredecessor(&block_equation_head);
+  block_equation_subtract.addPredecessor(&block_equation_head);
+  block_equation_rev_subtract.addPredecessor(&block_equation_head);
+  block_equation_min.addPredecessor(&block_equation_head);
+  block_equation_max.addPredecessor(&block_equation_head);
+
+  // Addition case (default).
+  builder_->setBuildPoint(&block_equation_add);
+  spv::Id result_add = builder_->createNoContractionBinOp(
+      spv::OpFAdd, value_type, term_source, term_dest);
+  builder_->createBranch(&block_equation_merge);
+
+  // Subtraction case.
+  builder_->setBuildPoint(&block_equation_subtract);
+  spv::Id result_subtract = builder_->createNoContractionBinOp(
+      spv::OpFSub, value_type, term_source, term_dest);
+  builder_->createBranch(&block_equation_merge);
+
+  // Reverse subtraction case.
+  builder_->setBuildPoint(&block_equation_rev_subtract);
+  spv::Id result_rev_subtract = builder_->createNoContractionBinOp(
+      spv::OpFSub, value_type, term_dest, term_source);
+  builder_->createBranch(&block_equation_merge);
+
+  // Min case.
+  builder_->setBuildPoint(&block_equation_min);
+  spv::Id result_min =
+      builder_->createBinBuiltinCall(value_type, ext_inst_glsl_std_450_,
+                                     GLSLstd450FMin, term_source, term_dest);
+  builder_->createBranch(&block_equation_merge);
+
+  // Max case.
+  builder_->setBuildPoint(&block_equation_max);
+  spv::Id result_max =
+      builder_->createBinBuiltinCall(value_type, ext_inst_glsl_std_450_,
+                                     GLSLstd450FMax, term_source, term_dest);
+  builder_->createBranch(&block_equation_merge);
+
+  // Merge and create phi for the result.
+  builder_->setBuildPoint(&block_equation_merge);
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(result_add);
+  id_vector_temp_.push_back(block_equation_add.getId());
+  id_vector_temp_.push_back(result_subtract);
+  id_vector_temp_.push_back(block_equation_subtract.getId());
+  id_vector_temp_.push_back(result_rev_subtract);
+  id_vector_temp_.push_back(block_equation_rev_subtract.getId());
+  id_vector_temp_.push_back(result_min);
+  id_vector_temp_.push_back(block_equation_min.getId());
+  id_vector_temp_.push_back(result_max);
+  id_vector_temp_.push_back(block_equation_max.getId());
+  spv::Id result_unclamped =
+      builder_->createOp(spv::OpPhi, value_type, id_vector_temp_);
+
+  return FSI_FlushNaNClampAndInBlending(result_unclamped, is_fixed_point,
+                                        clamp_min_value, clamp_max_value);
+}
+
+void SpirvShaderTranslator::FSI_AlphaToMaskSample(
+    bool initialize, uint32_t sample_index, float threshold_base,
+    spv::Id threshold_offset, float threshold_offset_scale, spv::Id alpha,
+    spv::Id& coverage_out) {
+  // Based on D3D12's CompletePixelShader_AlphaToMaskSample.
+  // Calculates threshold and tests alpha against it.
+  // threshold = threshold_base + threshold_offset * (-threshold_offset_scale)
+
+  spv::Id const_threshold_offset_scale =
+      builder_->makeFloatConstant(-threshold_offset_scale);
+  spv::Id threshold = builder_->createNoContractionBinOp(
+      spv::OpFMul, type_float_, threshold_offset, const_threshold_offset_scale);
+
+  spv::Id const_threshold_base = builder_->makeFloatConstant(threshold_base);
+  threshold = builder_->createNoContractionBinOp(
+      spv::OpFAdd, type_float_, const_threshold_base, threshold);
+
+  // Test: alpha >= threshold
+  // Using OpFOrdGreaterThanEqual for proper NaN handling (NaN results in false)
+  spv::Id sample_passes = builder_->createBinOp(spv::OpFOrdGreaterThanEqual,
+                                                type_bool_, alpha, threshold);
+
+  if (edram_fragment_shader_interlock_) {
+    // FSI mode: Clear both coverage and deferred depth bits for failed samples.
+    // This matches the D3D12 ROV implementation which uses ~(0b00010001 <<
+    // sample_index). The test must affect not only the coverage bits (0-3), but
+    // also the deferred depth/stencil write bits (4-7) since if a sample is
+    // discarded by alpha to coverage, it must not be written at all.
+
+    // Optimized: Pre-compute the clear mask constant
+    // clear_mask = ~(0b00010001 << sample_index)
+    spv::Id clear_mask =
+        builder_->makeUintConstant(~(0b00010001u << sample_index));
+
+    // If test passes, keep all bits; if test fails, apply clear_mask
+    // This avoids doing OpNot on every call by pre-computing the clear mask
+    spv::Id mask_to_apply = builder_->createTriOp(
+        spv::OpSelect, type_uint_, sample_passes,
+        builder_->makeUintConstant(0xFFFFFFFFu), clear_mask);
+
+    // Apply mask: coverage &= mask_to_apply
+    coverage_out = builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                         coverage_out, mask_to_apply);
+  } else {
+    // Non-FSI mode: Start with zero coverage, set bits for passed samples.
+    if (initialize) {
+      coverage_out = builder_->makeUintConstant(0u);
+    }
+
+    // If sample passes, set its bit in coverage mask.
+    // Create a mask with the sample bit set: (1 << sample_index)
+    spv::Id sample_bit = builder_->makeUintConstant(1u << sample_index);
+
+    // coverage = select(sample_passes, coverage | sample_bit, coverage)
+    spv::Id coverage_set = builder_->createBinOp(spv::OpBitwiseOr, type_uint_,
+                                                 coverage_out, sample_bit);
+    coverage_out = builder_->createTriOp(
+        spv::OpSelect, type_uint_, sample_passes, coverage_set, coverage_out);
+  }
+}
+
+void SpirvShaderTranslator::FSI_AlphaToMask() {
+  // Based on D3D12's CompletePixelShader_AlphaToMask.
+
+  // FSI mode implementation
+  if (edram_fragment_shader_interlock_) {
+    // Check if alpha to coverage can be done at all in this shader.
+    if (!current_shader().writes_color_target(0)) {
+      return;
+    }
+
+    // Check if we have the required variables
+    if (main_fsi_sample_mask_ == spv::NoResult) {
+      return;  // Sample mask not available
+    }
+    if (input_fragment_coordinates_ == spv::NoResult) {
+      return;  // Fragment coordinates not available
+    }
+    if (output_or_var_fragment_data_[0] == spv::NoResult) {
+      return;  // RT0 not available
+    }
+
+    // Load alpha_to_mask constant and check if enabled
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(
+        builder_->makeIntConstant(kSystemConstantAlphaToMask));
+    spv::Id alpha_to_mask_constant = builder_->createLoad(
+        builder_->createAccessChain(spv::StorageClassUniform,
+                                    uniform_system_constants_, id_vector_temp_),
+        spv::NoPrecision);
+
+    spv::Id alpha_to_mask_enabled = builder_->createBinOp(
+        spv::OpINotEqual, type_bool_, alpha_to_mask_constant,
+        builder_->makeUintConstant(0));
+
+    // Save the current block for PHI
+    spv::Block* block_before = builder_->getBuildPoint();
+    spv::Id mask_before = main_fsi_sample_mask_;
+
+    // Create blocks for control flow
+    spv::Block& block_alpha_enabled = builder_->makeNewBlock();
+    spv::Block& block_merge = builder_->makeNewBlock();
+
+    // Set up the conditional branch
+    builder_->createSelectionMerge(&block_merge,
+                                   spv::SelectionControlDontFlattenMask);
+    builder_->createConditionalBranch(alpha_to_mask_enabled,
+                                      &block_alpha_enabled, &block_merge);
+
+    // Alpha to coverage enabled path
+    builder_->setBuildPoint(&block_alpha_enabled);
+
+    // Start with the current sample mask (which includes both coverage bits 0-3
+    // and deferred depth bits 4-7). Alpha to coverage will clear both the
+    // coverage and deferred depth bits for samples that fail the alpha test.
+    // This matches the D3D12 ROV implementation.
+
+    // Extract dithering threshold offset from fragment position
+    spv::Id frag_coord =
+        builder_->createLoad(input_fragment_coordinates_, spv::NoPrecision);
+
+    spv::Id frag_x_float =
+        builder_->createCompositeExtract(frag_coord, type_float_, 0);
+    spv::Id frag_y_float =
+        builder_->createCompositeExtract(frag_coord, type_float_, 1);
+
+    spv::Id frag_x =
+        builder_->createUnaryOp(spv::OpConvertFToU, type_uint_, frag_x_float);
+    spv::Id frag_y =
+        builder_->createUnaryOp(spv::OpConvertFToU, type_uint_, frag_y_float);
+
+    // Calculate dithering offset: (Y & 1) | ((X & 1) << 1)
+    spv::Id y_bit = builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, frag_y,
+                                          builder_->makeUintConstant(1));
+    spv::Id x_bit = builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, frag_x,
+                                          builder_->makeUintConstant(1));
+    spv::Id x_bit_shifted =
+        builder_->createBinOp(spv::OpShiftLeftLogical, type_uint_, x_bit,
+                              builder_->makeUintConstant(1));
+    spv::Id offset_index = builder_->createBinOp(spv::OpBitwiseOr, type_uint_,
+                                                 y_bit, x_bit_shifted);
+
+    // Extract 2-bit offset from alpha_to_mask constant
+    spv::Id bit_position =
+        builder_->createBinOp(spv::OpShiftLeftLogical, type_uint_, offset_index,
+                              builder_->makeUintConstant(1));
+    spv::Id offset_shifted =
+        builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
+                              alpha_to_mask_constant, bit_position);
+    spv::Id threshold_offset_uint =
+        builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, offset_shifted,
+                              builder_->makeUintConstant(0b11));
+    spv::Id threshold_offset = builder_->createUnaryOp(
+        spv::OpConvertUToF, type_float_, threshold_offset_uint);
+
+    // Load alpha from RT0.w (oC0.w) once for all samples (optimization)
+    assert_true(output_or_var_fragment_data_[0] != spv::NoResult);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(builder_->makeIntConstant(3));  // W component
+    spv::Id alpha = builder_->createLoad(
+        builder_->createAccessChain(spv::StorageClassFunction,
+                                    output_or_var_fragment_data_[0],
+                                    id_vector_temp_),
+        spv::NoPrecision);
+
+    // Load MSAA sample count
+    spv::Id msaa_samples = LoadMsaaSamplesFromFlags();
+
+    // Create blocks for MSAA sample count selection
+    spv::Block& block_msaa_1x = builder_->makeNewBlock();
+    spv::Block& block_msaa_2x_actual = builder_->makeNewBlock();
+    spv::Block& block_msaa_4x = builder_->makeNewBlock();
+    spv::Block& block_msaa_check_2x = builder_->makeNewBlock();
+    spv::Block& block_msaa_merge = builder_->makeNewBlock();
+    spv::Block& block_msaa_merge_2x_1x = builder_->makeNewBlock();
+
+    // Check if 4x MSAA
+    spv::Id is_4x = builder_->createBinOp(
+        spv::OpIEqual, type_bool_, msaa_samples, builder_->makeUintConstant(2));
+
+    // Create selection for MSAA mode
+    builder_->createSelectionMerge(&block_msaa_merge,
+                                   spv::SelectionControlDontFlattenMask);
+    builder_->createConditionalBranch(is_4x, &block_msaa_4x,
+                                      &block_msaa_check_2x);
+
+    // 4x MSAA path
+    builder_->setBuildPoint(&block_msaa_4x);
+    spv::Id coverage_4x = main_fsi_sample_mask_;
+    FSI_AlphaToMaskSample(false, 0, 0.75f, threshold_offset, 1.0f / 16.0f,
+                          alpha, coverage_4x);
+    FSI_AlphaToMaskSample(false, 1, 0.25f, threshold_offset, 1.0f / 16.0f,
+                          alpha, coverage_4x);
+    FSI_AlphaToMaskSample(false, 2, 0.5f, threshold_offset, 1.0f / 16.0f, alpha,
+                          coverage_4x);
+    FSI_AlphaToMaskSample(false, 3, 1.0f, threshold_offset, 1.0f / 16.0f, alpha,
+                          coverage_4x);
+    builder_->createBranch(&block_msaa_merge);
+
+    // Check if 2x or 1x MSAA
+    builder_->setBuildPoint(&block_msaa_check_2x);
+    spv::Id is_2x = builder_->createBinOp(
+        spv::OpIEqual, type_bool_, msaa_samples, builder_->makeUintConstant(1));
+    builder_->createSelectionMerge(&block_msaa_merge_2x_1x,
+                                   spv::SelectionControlDontFlattenMask);
+    builder_->createConditionalBranch(is_2x, &block_msaa_2x_actual,
+                                      &block_msaa_1x);
+
+    // 2x MSAA path
+    builder_->setBuildPoint(&block_msaa_2x_actual);
+    spv::Id coverage_2x = main_fsi_sample_mask_;
+    FSI_AlphaToMaskSample(false, 0, 0.5f, threshold_offset, 1.0f / 8.0f, alpha,
+                          coverage_2x);
+    FSI_AlphaToMaskSample(false, 1, 1.0f, threshold_offset, 1.0f / 8.0f, alpha,
+                          coverage_2x);
+    builder_->createBranch(&block_msaa_merge_2x_1x);
+
+    // 1x MSAA path
+    builder_->setBuildPoint(&block_msaa_1x);
+    spv::Id coverage_1x = main_fsi_sample_mask_;
+    FSI_AlphaToMaskSample(false, 0, 1.0f, threshold_offset, 1.0f / 4.0f, alpha,
+                          coverage_1x);
+    builder_->createBranch(&block_msaa_merge_2x_1x);
+
+    // Merge 2x/1x MSAA paths
+    builder_->setBuildPoint(&block_msaa_merge_2x_1x);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(coverage_2x);
+    id_vector_temp_.push_back(block_msaa_2x_actual.getId());
+    id_vector_temp_.push_back(coverage_1x);
+    id_vector_temp_.push_back(block_msaa_1x.getId());
+    spv::Id coverage_2x_1x =
+        builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+    builder_->createBranch(&block_msaa_merge);
+
+    // Merge MSAA paths with PHI
+    builder_->setBuildPoint(&block_msaa_merge);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(coverage_4x);
+    id_vector_temp_.push_back(block_msaa_4x.getId());
+    id_vector_temp_.push_back(coverage_2x_1x);
+    id_vector_temp_.push_back(block_msaa_merge_2x_1x.getId());
+    spv::Id coverage_final =
+        builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+
+    // Branch to main merge
+    builder_->createBranch(&block_merge);
+
+    // Continue from merge block with PHI for the final mask
+    builder_->setBuildPoint(&block_merge);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(coverage_final);
+    id_vector_temp_.push_back(
+        block_msaa_merge.getId());  // Coming from the alpha enabled path
+    id_vector_temp_.push_back(mask_before);
+    id_vector_temp_.push_back(
+        block_before->getId());  // Coming from the disabled path
+    main_fsi_sample_mask_ =
+        builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+  }
+
+  // For FBO mode, ensure gl_SampleMask output was created
+  // For depth-only shaders, we don't create gl_SampleMask, so skip
+  if (output_fragment_sample_mask_ == spv::NoResult) {
+    return;
+  }
+
+  // Initialize OMask to full coverage (in case alpha to mask is disabled).
+  // gl_SampleMask is an array, so we need to access element [0].
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(builder_->makeIntConstant(0));
+  spv::Id sample_mask_element = builder_->createAccessChain(
+      spv::StorageClassOutput, output_fragment_sample_mask_, id_vector_temp_);
+  spv::Id full_coverage = builder_->makeIntConstant(-1);  // All bits set
+  builder_->createStore(full_coverage, sample_mask_element);
+
+  // Load alpha_to_mask constant and check if enabled.
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(
+      builder_->makeIntConstant(kSystemConstantAlphaToMask));
+  spv::Id alpha_to_mask_constant = builder_->createLoad(
+      builder_->createAccessChain(spv::StorageClassUniform,
+                                  uniform_system_constants_, id_vector_temp_),
+      spv::NoPrecision);
+
+  spv::Id alpha_to_mask_enabled = builder_->createBinOp(
+      spv::OpINotEqual, type_bool_, alpha_to_mask_constant,
+      builder_->makeUintConstant(0));
+
+  spv::Block& block_alpha_to_mask_enabled = builder_->makeNewBlock();
+  spv::Block& block_alpha_to_mask_merge = builder_->makeNewBlock();
+
+  builder_->createSelectionMerge(&block_alpha_to_mask_merge,
+                                 spv::SelectionControlDontFlattenMask);
+  builder_->createConditionalBranch(alpha_to_mask_enabled,
+                                    &block_alpha_to_mask_enabled,
+                                    &block_alpha_to_mask_merge);
+
+  builder_->setBuildPoint(&block_alpha_to_mask_enabled);
+
+  // Extract dithering threshold offset from fragment position.
+  // offset_index = (Y & 1) | ((X & 1) << 1)
+  // offset = (alpha_to_mask >> (offset_index * 2)) & 0b11
+  spv::Id frag_coord =
+      builder_->createLoad(input_fragment_coordinates_, spv::NoPrecision);
+
+  // Extract X and Y as floats first, then convert to uint
+  spv::Id frag_x_float =
+      builder_->createCompositeExtract(frag_coord, type_float_, 0);
+  spv::Id frag_y_float =
+      builder_->createCompositeExtract(frag_coord, type_float_, 1);
+
+  spv::Id frag_x =
+      builder_->createUnaryOp(spv::OpConvertFToU, type_uint_, frag_x_float);
+  spv::Id frag_y =
+      builder_->createUnaryOp(spv::OpConvertFToU, type_uint_, frag_y_float);
+
+  // Y & 1
+  spv::Id y_bit = builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, frag_y,
+                                        builder_->makeUintConstant(1));
+
+  // (X & 1) << 1
+  spv::Id x_bit = builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, frag_x,
+                                        builder_->makeUintConstant(1));
+  spv::Id x_bit_shifted =
+      builder_->createBinOp(spv::OpShiftLeftLogical, type_uint_, x_bit,
+                            builder_->makeUintConstant(1));
+
+  // offset_index = y_bit | x_bit_shifted
+  spv::Id offset_index =
+      builder_->createBinOp(spv::OpBitwiseOr, type_uint_, y_bit, x_bit_shifted);
+
+  // bit_position = offset_index * 2
+  spv::Id bit_position =
+      builder_->createBinOp(spv::OpShiftLeftLogical, type_uint_, offset_index,
+                            builder_->makeUintConstant(1));
+
+  // Extract 2-bit offset: (alpha_to_mask >> bit_position) & 0b11
+  spv::Id offset_shifted =
+      builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
+                            alpha_to_mask_constant, bit_position);
+  spv::Id threshold_offset_uint =
+      builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, offset_shifted,
+                            builder_->makeUintConstant(0b11));
+
+  // Convert offset to float (0.0, 1.0, 2.0, 3.0)
+  spv::Id threshold_offset = builder_->createUnaryOp(
+      spv::OpConvertUToF, type_float_, threshold_offset_uint);
+
+  // Load alpha from RT0.w (oC0.w) once for all samples (optimization)
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(builder_->makeIntConstant(3));  // W component
+  spv::Id alpha = builder_->createLoad(
+      builder_->createAccessChain(spv::StorageClassFunction,
+                                  output_or_var_fragment_data_[0],
+                                  id_vector_temp_),
+      spv::NoPrecision);
+
+  // Load MSAA sample count to determine which mode to use.
+  // 0 = 1x, 1 = 2x, 2 = 4x
+  spv::Id msaa_samples = LoadMsaaSamplesFromFlags();
+
+  // Check if MSAA is enabled (msaa_samples != 0)
+  spv::Id msaa_enabled =
+      builder_->createBinOp(spv::OpINotEqual, type_bool_, msaa_samples,
+                            builder_->makeUintConstant(0));
+
+  spv::Block& block_msaa_head = builder_->makeNewBlock();
+  spv::Block& block_msaa_enabled = builder_->makeNewBlock();
+  spv::Block& block_msaa_disabled = builder_->makeNewBlock();
+  spv::Block& block_msaa_merge = builder_->makeNewBlock();
+
+  builder_->createSelectionMerge(&block_msaa_merge,
+                                 spv::SelectionControlDontFlattenMask);
+  builder_->createConditionalBranch(msaa_enabled, &block_msaa_enabled,
+                                    &block_msaa_disabled);
+
+  // MSAA enabled - check if 4x or 2x
+  builder_->setBuildPoint(&block_msaa_enabled);
+
+  // msaa_samples: 1 = 2x, 2 = 4x
+  spv::Id is_4x_msaa = builder_->createBinOp(
+      spv::OpIEqual, type_bool_, msaa_samples, builder_->makeUintConstant(2));
+
+  spv::Block& block_4x_msaa = builder_->makeNewBlock();
+  spv::Block& block_2x_msaa = builder_->makeNewBlock();
+  spv::Block& block_msaa_mode_merge = builder_->makeNewBlock();
+
+  builder_->createSelectionMerge(&block_msaa_mode_merge,
+                                 spv::SelectionControlDontFlattenMask);
+  builder_->createConditionalBranch(is_4x_msaa, &block_4x_msaa, &block_2x_msaa);
+
+  // 4x MSAA
+  builder_->setBuildPoint(&block_4x_msaa);
+  spv::Id coverage_4x = spv::NoResult;
+  FSI_AlphaToMaskSample(true, 0, 0.75f, threshold_offset, 1.0f / 16.0f, alpha,
+                        coverage_4x);
+  FSI_AlphaToMaskSample(false, 1, 0.25f, threshold_offset, 1.0f / 16.0f, alpha,
+                        coverage_4x);
+  FSI_AlphaToMaskSample(false, 2, 0.5f, threshold_offset, 1.0f / 16.0f, alpha,
+                        coverage_4x);
+  FSI_AlphaToMaskSample(false, 3, 1.0f, threshold_offset, 1.0f / 16.0f, alpha,
+                        coverage_4x);
+  builder_->createBranch(&block_msaa_mode_merge);
+
+  // 2x MSAA
+  builder_->setBuildPoint(&block_2x_msaa);
+  spv::Id coverage_2x = spv::NoResult;
+  // FSI mode uses guest sample indices (0 and 1).
+  // FBO mode sample mapping depends on whether native 2x MSAA is supported:
+  // - Native 2x: host samples 1, 0 (reversed from guest order)
+  // - 2x as 4x: host samples 0, 3
+  if (edram_fragment_shader_interlock_) {
+    // FSI: Use guest indices 0, 1.
+    FSI_AlphaToMaskSample(true, 0, 0.5f, threshold_offset, 1.0f / 8.0f, alpha,
+                          coverage_2x);
+    FSI_AlphaToMaskSample(false, 1, 1.0f, threshold_offset, 1.0f / 8.0f, alpha,
+                          coverage_2x);
+  } else {
+    // FBO: Account for native 2x vs 2x-as-4x sample mapping. This epilogue only
+    // runs when there is a color attachment (sample mask output), so the native
+    // 2x decision must use the with-attachments capability, matching the host
+    // pipeline's native-vs-emulated 2x choice.
+    if (native_2x_msaa_with_attachments_) {
+      // Native 2x: D3D10.1+ standard - top is 1, bottom is 0.
+      FSI_AlphaToMaskSample(true, 1, 0.5f, threshold_offset, 1.0f / 8.0f, alpha,
+                            coverage_2x);
+      FSI_AlphaToMaskSample(false, 0, 1.0f, threshold_offset, 1.0f / 8.0f,
+                            alpha, coverage_2x);
+    } else {
+      // 2x as 4x: Use samples 0 and 3.
+      FSI_AlphaToMaskSample(true, 0, 0.5f, threshold_offset, 1.0f / 8.0f, alpha,
+                            coverage_2x);
+      FSI_AlphaToMaskSample(false, 3, 1.0f, threshold_offset, 1.0f / 8.0f,
+                            alpha, coverage_2x);
+    }
+  }
+  builder_->createBranch(&block_msaa_mode_merge);
+
+  builder_->setBuildPoint(&block_msaa_mode_merge);
+  // Merge coverage from 4x and 2x MSAA paths using PHI.
+  id_vector_temp_.clear();
+  id_vector_temp_.reserve(2 * 2);
+  id_vector_temp_.push_back(coverage_4x);
+  id_vector_temp_.push_back(block_4x_msaa.getId());
+  id_vector_temp_.push_back(coverage_2x);
+  id_vector_temp_.push_back(block_2x_msaa.getId());
+  spv::Id coverage_msaa_enabled =
+      builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+  builder_->createBranch(&block_msaa_merge);
+
+  // MSAA disabled - single sample
+  builder_->setBuildPoint(&block_msaa_disabled);
+  spv::Id coverage_1x = spv::NoResult;
+  FSI_AlphaToMaskSample(true, 0, 1.0f, threshold_offset, 1.0f / 4.0f, alpha,
+                        coverage_1x);
+  builder_->createBranch(&block_msaa_merge);
+
+  builder_->setBuildPoint(&block_msaa_merge);
+  // Merge coverage from MSAA enabled and disabled paths using PHI.
+  id_vector_temp_.clear();
+  id_vector_temp_.reserve(2 * 2);
+  id_vector_temp_.push_back(coverage_msaa_enabled);
+  id_vector_temp_.push_back(block_msaa_mode_merge.getId());
+  id_vector_temp_.push_back(coverage_1x);
+  id_vector_temp_.push_back(block_msaa_disabled.getId());
+  spv::Id coverage_final =
+      builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+
+  // Write coverage to gl_SampleMask and discard if zero (FBO mode only).
+  if (!edram_fragment_shader_interlock_) {
+    // Write to gl_SampleMask[0].
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(builder_->makeIntConstant(0));
+    spv::Id sample_mask_element = builder_->createAccessChain(
+        spv::StorageClassOutput, output_fragment_sample_mask_, id_vector_temp_);
+    spv::Id coverage_int =
+        builder_->createUnaryOp(spv::OpBitcast, type_int_, coverage_final);
+    builder_->createStore(coverage_int, sample_mask_element);
+
+    // Discard fragment if coverage is zero.
+    spv::Id coverage_zero =
+        builder_->createBinOp(spv::OpIEqual, type_bool_, coverage_final,
+                              builder_->makeUintConstant(0));
+    SpirvBuilder::IfBuilder coverage_discard_if(
+        coverage_zero, spv::SelectionControlDontFlattenMask, *builder_);
+    builder_->createNoResultOp(spv::OpKill);
+    // OpKill terminates the block, so makeEndIf with false to not branch.
+    coverage_discard_if.makeEndIf(false);
+  }
+
+  builder_->createBranch(&block_alpha_to_mask_merge);
+  builder_->setBuildPoint(&block_alpha_to_mask_merge);
+}
+
+}  // namespace gpu
+}  // namespace xe

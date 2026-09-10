@@ -1,0 +1,1316 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include "xenia/ui/game_list_panel_wx.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstring>
+
+#include <wx/button.h>
+#include <wx/dcclient.h>
+#include <wx/dcmemory.h>
+#include <wx/dialog.h>
+#include <wx/filedlg.h>
+#include <wx/font.h>
+#include <wx/image.h>
+#include <wx/menu.h>
+#include <wx/msgdlg.h>
+#include <wx/settings.h>
+#include <wx/sizer.h>
+#include <wx/stattext.h>
+#include <wx/textdlg.h>
+#include <wx/variant.h>
+
+#include "third_party/fmt/include/fmt/chrono.h"
+#include "third_party/fmt/include/fmt/format.h"
+
+#include "xenia/app/emulator_window.h"
+#include "xenia/app/game_compat_db.h"
+#include "xenia/base/chrono.h"
+#include "xenia/base/chrono_steady_cast.h"
+#include "xenia/base/filesystem.h"
+#include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
+#include "xenia/base/system.h"
+#include "xenia/emulator.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xam/profile_manager.h"
+#include "xenia/kernel/xam/user_profile.h"
+#include "xenia/kernel/xam/xam_state.h"
+#include "xenia/kernel/xam/xdbf/gpd_info_profile.h"
+#include "xenia/patcher/patch_db.h"
+#include "xenia/ui/game_config_dialog_wx.h"
+#include "xenia/ui/icon_decode.h"
+#include "xenia/ui/patches_dialog_wx.h"
+#include "xenia/xbox.h"
+
+#if XE_PLATFORM_LINUX
+#include <gtk/gtk.h>
+#endif
+
+#include <thread>
+
+namespace xe {
+namespace app {
+
+namespace {
+
+// Icon dimensions are expressed as logical DIPs at 96 DPI; the constructor
+// converts to device pixels via FromDIP() for the current monitor.
+constexpr int kIconSize = 64;
+constexpr int kCompatBallSize = 28;
+
+std::string ToLower(std::string_view s) {
+  std::string out(s);
+  std::transform(out.begin(), out.end(), out.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return out;
+}
+
+std::string FormatLastPlayed(time_t timestamp) {
+  if (timestamp == 0) {
+    return "-";
+  }
+  std::tm tm = {};
+#if XE_PLATFORM_WIN32
+  localtime_s(&tm, &timestamp);
+#else
+  localtime_r(&timestamp, &tm);
+#endif
+  return fmt::format("{:%Y-%m-%d %H:%M}", tm);
+}
+
+wxString CompatStateName(CompatState state) {
+  switch (state) {
+    case CompatState::kPlayable:
+      return _("Playable");
+    case CompatState::kGameplay:
+      return _("Gameplay");
+    case CompatState::kLoads:
+      return _("Loads");
+    case CompatState::kUnplayable:
+      return _("Unplayable");
+    case CompatState::kUnknown:
+    default:
+      return _("Unknown");
+  }
+}
+
+wxColour CompatColor(CompatState state) {
+  switch (state) {
+    case CompatState::kPlayable:
+      return wxColour(80, 200, 90);
+    case CompatState::kGameplay:
+      return wxColour(230, 200, 60);
+    case CompatState::kLoads:
+    case CompatState::kUnplayable:
+      return wxColour(220, 80, 80);
+    case CompatState::kUnknown:
+    default:
+      return wxColour(140, 140, 140);
+  }
+}
+
+// Centered text on a dark tile; a single '\n' in `text` splits two lines.
+wxBitmapBundle MakeTextPlaceholder(const wxString& text, int size_px,
+                                   double scale) {
+  wxBitmap bmp(size_px, size_px, 32);
+  wxMemoryDC dc(bmp);
+  dc.SetBackground(wxBrush(wxColour(60, 60, 60)));
+  dc.Clear();
+  wxFont font = dc.GetFont();
+  font.Scale(0.85f * static_cast<float>(scale));
+  dc.SetFont(font);
+  dc.SetTextForeground(wxColour(180, 180, 180));
+  wxString line1 = text.BeforeFirst('\n');
+  wxString line2 = text.AfterFirst('\n');
+  wxSize l1 = dc.GetTextExtent(line1);
+  const int gap = std::max(1, static_cast<int>(2 * scale));
+  if (line2.empty()) {
+    int y = (size_px - l1.y) / 2;
+    dc.DrawText(line1, (size_px - l1.x) / 2, y);
+  } else {
+    wxSize l2 = dc.GetTextExtent(line2);
+    int total_h = l1.y + l2.y + gap;
+    int y = (size_px - total_h) / 2;
+    dc.DrawText(line1, (size_px - l1.x) / 2, y);
+    dc.DrawText(line2, (size_px - l2.x) / 2, y + l1.y + gap);
+  }
+  dc.SelectObject(wxNullBitmap);
+  bmp.SetScaleFactor(scale);
+  return wxBitmapBundle::FromBitmap(bmp);
+}
+
+// Pixel-AA filled circle on a transparent bitmap; portable across themes.
+// `size_px` is the device-pixel size; `scale` is the DPI scale factor.
+wxBitmapBundle MakeCompatBall(CompatState state, int size_px, double scale) {
+  const float radius = (kCompatBallSize * 0.25f) * static_cast<float>(scale);
+  wxColour color = CompatColor(state);
+  wxImage image(size_px, size_px);
+  image.SetAlpha();
+  unsigned char* rgb = image.GetData();
+  unsigned char* alpha = image.GetAlpha();
+  std::memset(alpha, 0, static_cast<size_t>(size_px) * size_px);
+  const float cx = size_px * 0.5f;
+  const float cy = size_px * 0.5f;
+  for (int y = 0; y < size_px; ++y) {
+    for (int x = 0; x < size_px; ++x) {
+      float dx = x + 0.5f - cx;
+      float dy = y + 0.5f - cy;
+      float d = std::sqrt(dx * dx + dy * dy);
+      float a = std::clamp(radius - d + 0.5f, 0.0f, 1.0f);
+      if (a > 0.0f) {
+        size_t pi = (static_cast<size_t>(y) * size_px + x) * 3;
+        rgb[pi + 0] = color.Red();
+        rgb[pi + 1] = color.Green();
+        rgb[pi + 2] = color.Blue();
+        alpha[y * size_px + x] = static_cast<unsigned char>(a * 255.0f + 0.5f);
+      }
+    }
+  }
+  wxBitmap bmp(image);
+  bmp.SetScaleFactor(scale);
+  return wxBitmapBundle::FromBitmap(bmp);
+}
+
+#if XE_PLATFORM_LINUX
+// Modern GTK themes ignore wxDV_ROW_LINES (gtk_tree_view_set_rules_hint), so
+// flag odd rows with a bg attr that the renderer turns into cell-background.
+class AltRowListStore : public wxDataViewListStore {
+ public:
+  explicit AltRowListStore(const wxColour& alt_color) : alt_color_(alt_color) {}
+
+  bool GetAttrByRow(unsigned row, unsigned /*col*/,
+                    wxDataViewItemAttr& attr) const override {
+    if ((row & 1u) == 1u) {
+      attr.SetBackgroundColour(alt_color_);
+      return true;
+    }
+    return false;
+  }
+
+ private:
+  wxColour alt_color_;
+};
+
+// wxDataViewBitmapRenderer's GTK SetAttr is a no-op, so bg attrs don't reach
+// bitmap columns; forward them to cell-background-rgba ourselves.
+class AltBgBitmapRenderer : public wxDataViewBitmapRenderer {
+ public:
+  using wxDataViewBitmapRenderer::wxDataViewBitmapRenderer;
+
+  void SetAttr(const wxDataViewItemAttr& attr) override {
+    GtkCellRenderer* renderer = GetGtkHandle();
+    if (attr.HasBackgroundColour()) {
+      const wxColour& c = attr.GetBackgroundColour();
+      GdkRGBA rgba{c.Red() / 255.0, c.Green() / 255.0, c.Blue() / 255.0,
+                   c.Alpha() / 255.0};
+      g_object_set(renderer, "cell-background-rgba", &rgba, nullptr);
+    } else {
+      g_object_set(renderer, "cell-background-set", FALSE, nullptr);
+    }
+  }
+};
+#endif
+
+wxString EscapeMarkup(const wxString& s) {
+  wxString out;
+  out.reserve(s.length());
+  for (auto it = s.begin(); it != s.end(); ++it) {
+    wxUniChar ch = *it;
+    if (ch == '<') {
+      out += "&lt;";
+    } else if (ch == '>') {
+      out += "&gt;";
+    } else if (ch == '&') {
+      out += "&amp;";
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+GameListPanel::GameListPanel(wxWindow* parent, EmulatorWindow* emulator_window)
+    : wxPanel(parent, wxID_ANY), emulator_window_(emulator_window) {
+  search_ = new wxSearchCtrl(this, wxID_ANY);
+  search_->ShowCancelButton(true);
+  search_->SetDescriptiveText(_("Search games..."));
+  {
+    wxFont f = search_->GetFont();
+    f.Scale(1.4f);
+    search_->SetFont(f);
+  }
+
+  list_ = new wxDataViewListCtrl(this, wxID_ANY, wxDefaultPosition,
+                                 wxDefaultSize, wxDV_ROW_LINES | wxDV_SINGLE);
+  list_->SetMinSize(wxSize(0, 0));
+
+#if XE_PLATFORM_LINUX
+  // GTK ignores wxDV_ROW_LINES; swap in a store that drives alt rows itself.
+  {
+    const wxColour bg = wxSystemSettings::GetColour(wxSYS_COLOUR_LISTBOX);
+    const int alpha = bg.GetRGB() > 0x808080 ? 99 : 103;
+    auto* store = new AltRowListStore(bg.ChangeLightness(alpha));
+    list_->AssociateModel(store);
+    store->DecRef();
+  }
+#endif
+
+  // The wxDataViewCtrl MSW backend treats column widths and the row height as
+  // device pixels (the value flows straight through to ListView_SetColumnWidth
+  // / SetRowHeight). Resolve our DIP-denominated sizes once for the current
+  // monitor so the layout matches the actual rendered icon size.
+  dpi_scale_ = GetDPIScaleFactor();
+  icon_size_px_ = FromDIP(kIconSize);
+  const int icon_pad_px = FromDIP(8);
+  not_played_placeholder_ =
+      MakeTextPlaceholder(_("Not\nplayed"), icon_size_px_, dpi_scale_);
+  const int ball_size_px = FromDIP(kCompatBallSize);
+  for (size_t i = 0; i < compat_balls_.size(); ++i) {
+    compat_balls_[i] =
+        MakeCompatBall(static_cast<CompatState>(i), ball_size_px, dpi_scale_);
+  }
+
+  // Derive sizes from the list's actual font so the layout grows with the
+  // user's Windows text-scaling setting instead of clipping at fixed pixels.
+  wxClientDC dc(this);
+  dc.SetFont(list_->GetFont());
+  const int char_h = dc.GetCharHeight();
+  const int char_w = dc.GetCharWidth();
+  auto col_w = [&](const wxString& header, const wxString& sample) {
+    int hw = dc.GetTextExtent(header).GetWidth();
+    int sw = dc.GetTextExtent(sample).GetWidth();
+    // Leave room for the sort-indicator arrow and a small padding gap.
+    return std::max(hw, sw) + char_w * 4;
+  };
+  // Title is rendered with x-large markup (~1.5x base font); row must fit
+  // either that or the DPI-scaled icon.
+  list_->SetRowHeight(std::max(icon_size_px_ + icon_pad_px,
+                               static_cast<int>(char_h * 1.6f) + icon_pad_px));
+  const wxString status_header = _("Status");
+  const wxString icon_header = _("Icon");
+  const wxString title_header = _("Title");
+  const wxString achievements_header = _("Achievements");
+  const wxString gamerscore_header = _("Gamerscore");
+  const wxString last_played_header = _("Last Played");
+  auto append_bitmap_column = [&](const wxString& title, unsigned model_col,
+                                  int width, wxAlignment align) {
+#if XE_PLATFORM_LINUX
+    // Custom renderer so the alt-row bg reaches bitmap columns.
+    auto* renderer = new AltBgBitmapRenderer(
+        wxDataViewBitmapRenderer::GetDefaultType(), wxDATAVIEW_CELL_INERT);
+    auto* col =
+        new wxDataViewColumn(title, renderer, model_col, width, align, 0);
+    list_->AppendColumn(col, wxDataViewBitmapRenderer::GetDefaultType());
+#else
+    list_->AppendBitmapColumn(title, model_col, wxDATAVIEW_CELL_INERT, width,
+                              align, 0);
+#endif
+  };
+  append_bitmap_column(status_header, 0, col_w(status_header, status_header),
+                       wxALIGN_CENTER);
+  append_bitmap_column(icon_header, 1, icon_size_px_ + icon_pad_px,
+                       wxALIGN_CENTER);
+  // Title is the only flexible column; the rest are pinned at their measured
+  // widths so a wider window doesn't stretch them.
+  auto* title_col = list_->AppendTextColumn(
+      title_header, wxDATAVIEW_CELL_INERT, static_cast<int>(char_w * 30 * 1.5f),
+      wxALIGN_LEFT, 0);
+  if (title_col) {
+    if (auto* tr =
+            dynamic_cast<wxDataViewTextRenderer*>(title_col->GetRenderer())) {
+      tr->EnableMarkup(true);
+    }
+  }
+  list_->AppendTextColumn(achievements_header, wxDATAVIEW_CELL_INERT,
+                          col_w(achievements_header, "9999/9999"), wxALIGN_LEFT,
+                          0);
+  list_->AppendTextColumn(gamerscore_header, wxDATAVIEW_CELL_INERT,
+                          col_w(gamerscore_header, "99999/999999 G"),
+                          wxALIGN_LEFT, 0);
+  // Trim the standard padding a bit — Last Played is right-aligned, so the
+  // header's sort arrow doesn't fight with the value text.
+  const int last_played_width =
+      col_w(last_played_header, "0000-00-00 00:00") - char_w * 2;
+  list_->AppendTextColumn(last_played_header, wxDATAVIEW_CELL_INERT,
+                          last_played_width, wxALIGN_RIGHT, 0);
+
+#if XE_PLATFORM_LINUX
+  // Without this GtkTreeView grows the rightmost column instead.
+  if (title_col) {
+    if (auto* h = title_col->GetGtkHandle()) {
+      gtk_tree_view_column_set_expand(GTK_TREE_VIEW_COLUMN(h), TRUE);
+    }
+  }
+#else
+  // wxDataViewCtrl auto-expands the rightmost column; pre-empt by sizing
+  // Title to absorb the slack on every SIZE event.
+  const int min_title_width = char_w * 20;
+  list_->Bind(wxEVT_SIZE, [this, last_played_width, min_title_width,
+                           char_w](wxSizeEvent& event) {
+    event.Skip();
+    if (list_->GetColumnCount() < 6) {
+      return;
+    }
+    list_->GetColumn(5)->SetWidth(last_played_width);
+    int fixed = 0;
+    for (unsigned i = 0; i < list_->GetColumnCount(); ++i) {
+      if (i == 2) {
+        continue;
+      }
+      fixed += list_->GetColumn(i)->GetWidth();
+    }
+    int avail = list_->GetClientSize().GetWidth();
+#if XE_PLATFORM_MAC
+    // wx's DoGetClientSize doesn't subtract NSScrollView's own scroller, and
+    // NSOutlineView adds intercell spacing + per-cell insets that aren't in
+    // the widths we set. Reserve enough to absorb all of it.
+    avail -= wxSystemSettings::GetMetric(wxSYS_VSCROLL_X, list_) + char_w * 10;
+#endif
+    list_->GetColumn(2)->SetWidth(std::max(avail - fixed, min_title_width));
+  });
+#endif
+
+  search_->Bind(wxEVT_TEXT, &GameListPanel::OnSearch, this);
+  search_->Bind(wxEVT_SEARCH_CANCEL,
+                [this](wxCommandEvent&) { search_->Clear(); });
+  list_->Bind(wxEVT_DATAVIEW_ITEM_ACTIVATED, &GameListPanel::OnItemActivated,
+              this);
+  list_->Bind(wxEVT_DATAVIEW_SELECTION_CHANGED,
+              &GameListPanel::OnSelectionChanged, this);
+  list_->Bind(wxEVT_DATAVIEW_ITEM_CONTEXT_MENU,
+              &GameListPanel::OnItemContextMenu, this);
+  list_->Bind(wxEVT_DATAVIEW_COLUMN_HEADER_CLICK,
+              &GameListPanel::OnColumnHeaderClick, this);
+  // Bind motion on both because the inner client window may consume it.
+  list_->Bind(wxEVT_MOTION, &GameListPanel::OnListMouseMotion, this);
+  if (auto* main = list_->GetMainWindow()) {
+    main->Bind(wxEVT_MOTION, &GameListPanel::OnListMouseMotion, this);
+  }
+
+  loading_panel_ = new wxPanel(this, wxID_ANY);
+  {
+    auto* loading_sizer = new wxBoxSizer(wxVERTICAL);
+    loading_sizer->AddStretchSpacer(1);
+    auto* loading_label =
+        new wxStaticText(loading_panel_, wxID_ANY, _("Loading titles..."));
+    wxFont loading_font = loading_label->GetFont();
+    loading_font.Scale(1.2f);
+    loading_label->SetFont(loading_font);
+    loading_sizer->Add(loading_label, 0, wxALIGN_CENTER_HORIZONTAL);
+    loading_sizer->AddStretchSpacer(1);
+    loading_panel_->SetSizer(loading_sizer);
+  }
+  list_->Hide();
+
+  auto* sizer = new wxBoxSizer(wxVERTICAL);
+  sizer->Add(search_, wxSizerFlags().Expand().Border(wxALL, 4));
+  sizer->Add(loading_panel_,
+             wxSizerFlags(1).Expand().Border(wxLEFT | wxRIGHT | wxBOTTOM, 4));
+  sizer->Add(list_,
+             wxSizerFlags(1).Expand().Border(wxLEFT | wxRIGHT | wxBOTTOM, 4));
+  SetSizer(sizer);
+
+  // wxPanel's default size handler doesn't always relayout reliably when the
+  // panel is mounted by AUI — call Layout() explicitly on every size event.
+  Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+    Layout();
+    event.Skip();
+  });
+}
+
+void GameListPanel::Reload() {
+  entries_.clear();
+  auto reveal_list = [this]() {
+    if (loading_panel_ && loading_panel_->IsShown()) {
+      loading_panel_->Hide();
+      list_->Show();
+      Layout();
+    }
+  };
+
+  if (!emulator_window_) {
+    Repopulate();
+    reveal_list();
+    return;
+  }
+  auto* library = emulator_window_->game_library();
+  if (!library) {
+    Repopulate();
+    reveal_list();
+    return;
+  }
+
+  const auto& games = library->entries();
+  entries_.reserve(games.size());
+  for (const auto& g : games) {
+    Entry e;
+    e.title_id = g.title_id;
+    e.title_name = g.name;
+    e.path = g.paths.empty() ? std::filesystem::path{} : g.default_path().path;
+    e.discs.reserve(g.paths.size());
+    for (const auto& p : g.paths) {
+      e.discs.push_back(Disc{p.path, p.label});
+    }
+    entries_.push_back(std::move(e));
+  }
+
+  // Per-profile timestamps are cheap; icons are PNG decodes and dominate the
+  // load. Apply timestamps now, render the list, then trickle icons in.
+  LoadTimestampsFromProfiles();
+  Repopulate();
+  UpdateSearchPlaceholder();
+  reveal_list();
+  StartIconLoad();
+}
+
+void GameListPanel::UpdateSearchPlaceholder() {
+  if (entries_.empty()) {
+    search_->SetDescriptiveText(_("Search games..."));
+    return;
+  }
+  search_->SetDescriptiveText(
+      wxString::Format(_("Search %zu games..."), entries_.size()));
+}
+
+void GameListPanel::LoadTimestampsFromProfiles() {
+  if (!emulator_window_ || !emulator_window_->emulator()) {
+    return;
+  }
+  auto* kernel_state = emulator_window_->emulator()->kernel_state();
+  if (!kernel_state) {
+    return;
+  }
+  auto* xam_state = kernel_state->xam_state();
+  if (!xam_state) {
+    return;
+  }
+  auto* profile_manager = xam_state->profile_manager();
+  if (!profile_manager) {
+    return;
+  }
+
+  for (uint8_t user_index = 0; user_index < 4; ++user_index) {
+    auto* profile = profile_manager->GetProfile(user_index);
+    if (!profile) {
+      continue;
+    }
+    const auto& dashboard = profile->dashboard_gpd();
+    if (!dashboard.IsValid()) {
+      continue;
+    }
+    auto title_infos = dashboard.GetTitlesInfo();
+    for (auto& entry : entries_) {
+      for (const auto& info : title_infos) {
+        if (info->title_id == entry.title_id && info->last_played.is_valid()) {
+          auto last_played_tp =
+              chrono::WinSystemClock::to_sys(info->last_played.to_time_point());
+          entry.last_run_time =
+              std::chrono::system_clock::to_time_t(last_played_tp);
+          break;
+        }
+      }
+      auto stats = profile->GetTitleAchievementStats(entry.title_id);
+      if (stats.achievements_total > entry.achievements_total) {
+        entry.achievements_total = stats.achievements_total;
+        entry.achievements_unlocked = stats.achievements_unlocked;
+        entry.gamerscore_total = stats.gamerscore_total;
+        entry.gamerscore_earned = stats.gamerscore_earned;
+      }
+    }
+  }
+}
+
+void GameListPanel::StartIconLoad() {
+  ++icon_load_generation_;
+  if (entries_.empty()) {
+    return;
+  }
+  int gen = icon_load_generation_;
+  CallAfter([this, gen]() { ProcessIconChunk(0, gen); });
+}
+
+void GameListPanel::ProcessIconChunk(size_t start, int gen) {
+  if (gen != icon_load_generation_) {
+    return;
+  }
+  if (!emulator_window_) {
+    return;
+  }
+  auto* library = emulator_window_->game_library();
+  if (!library) {
+    return;
+  }
+
+  // Tune so each chunk stays well under one frame (~16ms): a PNG decode +
+  // rescale is a few ms, so 8 per chunk keeps the UI responsive.
+  constexpr size_t kChunkSize = 8;
+  size_t end = std::min(start + kChunkSize, entries_.size());
+  for (size_t i = start; i < end; ++i) {
+    auto& entry = entries_[i];
+    if (entry.icon.IsOk()) {
+      continue;
+    }
+    std::vector<uint8_t> data =
+        xe::filesystem::ReadAllBytes(library->IconPath(entry.title_id));
+    if (data.empty()) {
+      continue;
+    }
+    entry.icon = ui::DecodePngIcon(data, icon_size_px_, dpi_scale_);
+    if (!entry.icon.IsOk()) {
+      continue;
+    }
+    for (size_t r = 0; r < visible_indices_.size(); ++r) {
+      if (visible_indices_[r] == i) {
+        wxVariant v;
+        v << entry.icon;
+        list_->SetValue(v, static_cast<unsigned int>(r), 1);
+        break;
+      }
+    }
+  }
+  if (end < entries_.size()) {
+    CallAfter([this, end, gen]() { ProcessIconChunk(end, gen); });
+  }
+}
+
+void GameListPanel::OnSearch(wxCommandEvent&) {
+  filter_lower_ = ToLower(search_->GetValue().utf8_string());
+  Repopulate();
+}
+
+void GameListPanel::LaunchOrPrompt(uint32_t title_id,
+                                   const std::filesystem::path& path) {
+  if (!launch_cb_) {
+    return;
+  }
+  std::error_code ec;
+  if (!path.empty() && std::filesystem::exists(path, ec)) {
+    launch_cb_(path);
+    return;
+  }
+  wxString warning = path.empty()
+                         ? _("No file path is set for this title.")
+                         : wxString::Format(_("File not found:\n%s"),
+                                            wxString::FromUTF8(path.string()));
+  wxMessageDialog confirm(this, warning + _("\n\nBrowse for the file?"),
+                          _("Title not found"), wxYES_NO | wxICON_WARNING);
+  if (confirm.ShowModal() != wxID_YES) {
+    return;
+  }
+  std::filesystem::path initial_dir =
+      path.empty() ? std::filesystem::path() : path.parent_path();
+  wxFileDialog dlg(this, _("Select Content Package"),
+                   initial_dir.empty()
+                       ? wxString()
+                       : wxString::FromUTF8(initial_dir.string()),
+                   wxEmptyString,
+                   _("Supported Files|*;*.iso;*.xex;*.zar|"
+                     "Disc Image (*.iso)|*.iso|"
+                     "Disc Archive (*.zar)|*.zar|"
+                     "Xbox Executable (*.xex)|*.xex|"
+                     "All Files (*.*)|*.*"),
+                   wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+  if (dlg.ShowModal() == wxID_OK) {
+    // Replacement chosen, drop the stale path.
+    if (emulator_window_) {
+      if (auto* library = emulator_window_->game_library()) {
+        library->RemovePath(title_id, path);
+      }
+    }
+    launch_cb_(std::filesystem::path(dlg.GetPath().utf8_string()));
+  }
+}
+
+void GameListPanel::ShowEditDiscsDialog(size_t entry_index) {
+  if (entry_index >= entries_.size()) {
+    return;
+  }
+  if (!emulator_window_) {
+    return;
+  }
+  auto* library = emulator_window_->game_library();
+  if (!library) {
+    return;
+  }
+
+  uint32_t title_id = entries_[entry_index].title_id;
+
+  // Re-pull this entry from the library after an edit.
+  auto resync = [&]() {
+    auto* le = library->Find(title_id);
+    if (!le) {
+      entries_[entry_index].discs.clear();
+      return;
+    }
+    entries_[entry_index].title_name = le->name;
+    entries_[entry_index].path =
+        le->paths.empty() ? std::filesystem::path{} : le->default_path().path;
+    entries_[entry_index].discs.clear();
+    for (const auto& p : le->paths) {
+      entries_[entry_index].discs.push_back(Disc{p.path, p.label});
+    }
+  };
+
+  wxDialog dlg(this, wxID_ANY, _("Edit Discs"), wxDefaultPosition,
+               wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+  auto* sizer = new wxBoxSizer(wxVERTICAL);
+
+  auto* list =
+      new wxDataViewListCtrl(&dlg, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                             wxDV_ROW_LINES | wxDV_SINGLE);
+  // Font-measured widths scale with DPI and text scaling; column widths feed
+  // wxDataViewCtrl as device pixels, so no FromDIP.
+  wxClientDC dc(&dlg);
+  dc.SetFont(list->GetFont());
+  const int char_w = dc.GetCharWidth();
+  const int char_h = dc.GetCharHeight();
+  auto fit = [&](const wxString& header, const wxString& sample) {
+    int hw = dc.GetTextExtent(header).GetWidth();
+    int sw = dc.GetTextExtent(sample).GetWidth();
+    return std::max(hw, sw) + char_w * 4;
+  };
+  wxString widest_label;
+  wxString widest_path;
+  int widest_label_w = 0;
+  int widest_path_w = 0;
+  {
+    size_t disc_num = 1;
+    for (const auto& disc : entries_[entry_index].discs) {
+      wxString l = disc.label.empty()
+                       ? wxString::Format(_("Disc %zu"), disc_num)
+                       : wxString::FromUTF8(disc.label);
+      int lw = dc.GetTextExtent(l).GetWidth();
+      if (lw > widest_label_w) {
+        widest_label_w = lw;
+        widest_label = l;
+      }
+      wxString p = wxString::FromUTF8(disc.path.string());
+      int pw = dc.GetTextExtent(p).GetWidth();
+      if (pw > widest_path_w) {
+        widest_path_w = pw;
+        widest_path = p;
+      }
+      ++disc_num;
+    }
+  }
+  const int col_default_w = fit(_("Default"), "[*]");
+  const int col_label_w = fit(_("Label"), widest_label);
+  const int col_path_w = fit(_("Path"), widest_path);
+  list->AppendTextColumn(_("Default"), wxDATAVIEW_CELL_INERT, col_default_w,
+                         wxALIGN_CENTER, 0);
+  list->AppendTextColumn(_("Label"), wxDATAVIEW_CELL_INERT, col_label_w,
+                         wxALIGN_LEFT, wxDATAVIEW_COL_RESIZABLE);
+  list->AppendTextColumn(_("Path"), wxDATAVIEW_CELL_INERT, col_path_w,
+                         wxALIGN_LEFT, wxDATAVIEW_COL_RESIZABLE);
+  sizer->Add(list, 1, wxEXPAND | wxALL, 8);
+
+  auto refresh = [&]() {
+    list->DeleteAllItems();
+    if (entry_index >= entries_.size()) {
+      return;
+    }
+    const auto& default_path = entries_[entry_index].path;
+    size_t disc_num = 1;
+    for (const auto& disc : entries_[entry_index].discs) {
+      wxString label = disc.label.empty()
+                           ? wxString::Format(_("Disc %zu"), disc_num)
+                           : wxString::FromUTF8(disc.label);
+      const bool is_default =
+          !default_path.empty() && disc.path == default_path;
+      wxVector<wxVariant> row;
+      row.push_back(wxVariant(is_default ? wxString("[*]") : wxString()));
+      row.push_back(wxVariant(label));
+      row.push_back(wxVariant(wxString::FromUTF8(disc.path.string())));
+      list->AppendItem(row);
+      ++disc_num;
+    }
+    if (list->GetItemCount() > 0) {
+      list->SelectRow(0);
+    }
+  };
+  refresh();
+
+  auto* button_row = new wxBoxSizer(wxHORIZONTAL);
+  auto* rename = new wxButton(&dlg, wxID_ANY, _("Rename Label..."));
+  auto* remove = new wxButton(&dlg, wxID_ANY, _("Remove"));
+  auto* close = new wxButton(&dlg, wxID_CLOSE, _("Close"));
+  button_row->Add(rename, 0, wxRIGHT, 4);
+  button_row->Add(remove, 0, wxRIGHT, 4);
+  button_row->AddStretchSpacer();
+  button_row->Add(close, 0);
+  sizer->Add(button_row, 0, wxEXPAND | wxALL, 8);
+
+  auto current_disc_path = [&]() -> std::filesystem::path {
+    int sel = list->GetSelectedRow();
+    if (sel == wxNOT_FOUND || entry_index >= entries_.size() ||
+        size_t(sel) >= entries_[entry_index].discs.size()) {
+      return {};
+    }
+    return entries_[entry_index].discs[sel].path;
+  };
+
+  rename->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+    int sel = list->GetSelectedRow();
+    if (sel == wxNOT_FOUND || entry_index >= entries_.size() ||
+        size_t(sel) >= entries_[entry_index].discs.size()) {
+      return;
+    }
+    wxString current =
+        wxString::FromUTF8(entries_[entry_index].discs[sel].label);
+    wxTextEntryDialog input(&dlg, _("Enter new label:"), _("Rename Label"),
+                            current);
+    if (input.ShowModal() != wxID_OK) {
+      return;
+    }
+    std::string new_label = input.GetValue().utf8_string();
+    if (new_label.find("::") != std::string::npos) {
+      wxMessageDialog(&dlg, _("Label cannot contain '::'."), _("Invalid Label"),
+                      wxOK | wxICON_WARNING)
+          .ShowModal();
+      return;
+    }
+    const auto disc_path = current_disc_path();
+    if (auto* le = library->Find(title_id)) {
+      for (auto& p : le->paths) {
+        if (p.path == disc_path) {
+          p.label = new_label;
+        }
+      }
+      library->Upsert(*le);
+    }
+    resync();
+    refresh();
+    list->SelectRow(sel);
+  });
+
+  remove->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+    int sel = list->GetSelectedRow();
+    if (sel == wxNOT_FOUND || entry_index >= entries_.size() ||
+        size_t(sel) >= entries_[entry_index].discs.size()) {
+      return;
+    }
+    const auto& disc = entries_[entry_index].discs[sel];
+    wxString label = disc.label.empty() ? wxString::FromUTF8(disc.path.string())
+                                        : wxString::FromUTF8(disc.label);
+    wxMessageDialog confirm(
+        &dlg, wxString::Format(_("Remove '%s' from the disc list?"), label),
+        _("Remove Disc"), wxYES_NO | wxICON_WARNING);
+    if (confirm.ShowModal() != wxID_YES) {
+      return;
+    }
+    const auto disc_path = current_disc_path();
+    if (auto* le = library->Find(title_id)) {
+      le->paths.erase(
+          std::remove_if(le->paths.begin(), le->paths.end(),
+                         [&](const auto& p) { return p.path == disc_path; }),
+          le->paths.end());
+      if (le->paths.empty()) {
+        library->Remove(title_id);
+      } else {
+        library->Upsert(*le);
+      }
+    }
+    resync();
+    refresh();
+  });
+
+  close->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) { dlg.EndModal(wxID_CLOSE); });
+
+  dlg.SetSizer(sizer);
+  {
+    const int frame_slack = char_w * 6;
+    const int desired_w =
+        col_default_w + col_label_w + col_path_w + frame_slack;
+    dlg.SetSize(
+        wxSize(std::clamp(desired_w, char_w * 60, char_w * 140), char_h * 18));
+    dlg.CentreOnParent();
+  }
+  dlg.ShowModal();
+
+  // Reflect any changes in the main list view.
+  Repopulate();
+}
+
+void GameListPanel::OnItemActivated(wxDataViewEvent& event) {
+  int row = list_->ItemToRow(event.GetItem());
+  if (row < 0 || row >= static_cast<int>(visible_indices_.size())) {
+    return;
+  }
+  size_t idx = visible_indices_[row];
+  if (idx >= entries_.size()) {
+    return;
+  }
+  LaunchOrPrompt(entries_[idx].title_id, entries_[idx].path);
+}
+
+void GameListPanel::OnSelectionChanged(wxDataViewEvent&) {
+  if (selection_changed_cb_) {
+    selection_changed_cb_();
+  }
+}
+
+CompatState GameListPanel::GetEntryCompatState(const Entry& e) const {
+  CompatState base = GetCompatState(e.title_id);
+  // Best of (achievements unlocked %) and (gamerscore earned %).
+  float pct = 0.0f;
+  if (e.achievements_total > 0) {
+    pct = std::max(pct, static_cast<float>(e.achievements_unlocked) /
+                            static_cast<float>(e.achievements_total));
+  }
+  if (e.gamerscore_total > 0) {
+    pct = std::max(pct, static_cast<float>(e.gamerscore_earned) /
+                            static_cast<float>(e.gamerscore_total));
+  }
+  if (pct >= 0.80f) {
+    return CompatState::kPlayable;
+  }
+  if (base == CompatState::kUnknown && pct >= 0.10f) {
+    return CompatState::kGameplay;
+  }
+  return base;
+}
+
+void GameListPanel::OnListMouseMotion(wxMouseEvent& event) {
+  event.Skip();
+  if (!list_) {
+    return;
+  }
+  // HitTest expects coords in list_'s frame regardless of event origin.
+  wxPoint pt = list_->ScreenToClient(::wxGetMousePosition());
+  wxDataViewItem item;
+  wxDataViewColumn* col = nullptr;
+  list_->HitTest(pt, item, col);
+
+  wxString text;
+  if (item.IsOk() && col) {
+    int pos = list_->GetColumnPosition(col);
+    int row = list_->ItemToRow(item);
+    if (row >= 0 && row < static_cast<int>(visible_indices_.size())) {
+      size_t idx = visible_indices_[row];
+      if (idx < entries_.size()) {
+        const auto& e = entries_[idx];
+        if (pos == 0) {
+          text = CompatStateName(GetEntryCompatState(e));
+        } else if (pos == 2 && !e.path.empty()) {
+          text = wxString::FromUTF8(xe::path_to_utf8(e.path));
+        }
+      }
+    }
+  }
+  if (text == last_tooltip_text_) {
+    return;
+  }
+  last_tooltip_text_ = text;
+  if (text.empty()) {
+    list_->UnsetToolTip();
+  } else {
+    list_->SetToolTip(text);
+  }
+}
+
+void GameListPanel::OnItemContextMenu(wxDataViewEvent& event) {
+  int row = list_->ItemToRow(event.GetItem());
+  if (row < 0 || row >= static_cast<int>(visible_indices_.size())) {
+    return;
+  }
+  size_t idx = visible_indices_[row];
+  if (idx >= entries_.size()) {
+    return;
+  }
+  const Entry& entry = entries_[idx];
+
+  auto open_path_in_explorer = [](std::filesystem::path path) {
+    std::thread(xe::LaunchFileExplorer, std::move(path)).detach();
+  };
+
+  wxMenu menu;
+  if (!entry.path.empty()) {
+    if (entry.discs.size() > 1) {
+      auto* launch_submenu = new wxMenu;
+      size_t disc_num = 1;
+      for (const auto& disc : entry.discs) {
+        wxString label = disc.label.empty()
+                             ? wxString::Format(_("Disc %zu"), disc_num)
+                             : wxString::FromUTF8(disc.label);
+        auto* item = launch_submenu->Append(wxID_ANY, label);
+        menu.Bind(
+            wxEVT_MENU,
+            [this, title_id = entry.title_id, path = disc.path](
+                wxCommandEvent&) { LaunchOrPrompt(title_id, path); },
+            item->GetId());
+        ++disc_num;
+      }
+      menu.AppendSubMenu(launch_submenu, _("Launch"));
+      auto* edit_discs = menu.Append(wxID_ANY, _("Edit Discs..."));
+      menu.Bind(
+          wxEVT_MENU,
+          [this, idx](wxCommandEvent&) { ShowEditDiscsDialog(idx); },
+          edit_discs->GetId());
+    } else {
+      auto* launch = menu.Append(wxID_ANY, _("Launch"));
+      menu.Bind(
+          wxEVT_MENU,
+          [this, title_id = entry.title_id, path = entry.path](
+              wxCommandEvent&) { LaunchOrPrompt(title_id, path); },
+          launch->GetId());
+    }
+    auto* open_folder = menu.Append(wxID_ANY, _("Open containing folder"));
+    menu.Bind(
+        wxEVT_MENU,
+        [open_path_in_explorer, parent = entry.path.parent_path()](
+            wxCommandEvent&) { open_path_in_explorer(parent); },
+        open_folder->GetId());
+  }
+
+  if (entry.title_id != 0 && emulator_window_ && emulator_window_->emulator()) {
+    auto* kernel_state = emulator_window_->emulator()->kernel_state();
+    auto* xam_state = kernel_state ? kernel_state->xam_state() : nullptr;
+    auto* profile_manager = xam_state ? xam_state->profile_manager() : nullptr;
+    if (profile_manager) {
+      menu.AppendSeparator();
+      auto* primary = profile_manager->GetProfile(uint8_t(0));
+      uint64_t xuid = primary ? primary->xuid() : 0;
+
+      auto add_content_item = [&](const wxString& label,
+                                  std::filesystem::path path, bool gated) {
+        auto* item = menu.Append(wxID_ANY, label);
+        if (gated || !std::filesystem::exists(path)) {
+          item->Enable(false);
+          return;
+        }
+        menu.Bind(
+            wxEVT_MENU,
+            [open_path_in_explorer, path = std::move(path)](wxCommandEvent&) {
+              open_path_in_explorer(path);
+            },
+            item->GetId());
+      };
+
+      add_content_item(_("Saves"),
+                       profile_manager->GetProfileContentPath(
+                           xuid, entry.title_id, XContentType::kSavedGame),
+                       /*gated=*/!primary);
+      add_content_item(_("Title Updates"),
+                       profile_manager->GetProfileContentPath(
+                           0, entry.title_id, XContentType::kInstaller),
+                       false);
+      add_content_item(
+          _("DLC"),
+          profile_manager->GetProfileContentPath(
+              0, entry.title_id, XContentType::kMarketplaceContent),
+          false);
+    }
+  }
+
+  if (entry.title_id != 0) {
+    auto bundled = xe::patcher::EnumerateBundledPatchesForTitle(entry.title_id);
+    if (bundled.empty()) {
+      auto* item = menu.Append(wxID_ANY, _("Patches"));
+      item->Enable(false);
+    } else {
+      auto* patches_submenu = new wxMenu;
+      for (const auto& bpf : bundled) {
+        std::string display = bpf.filename;
+        if (auto dash = display.find(" - "); dash != std::string::npos) {
+          display = display.substr(dash + 3);
+        }
+        if (auto suffix = display.rfind(".patch.toml");
+            suffix != std::string::npos) {
+          display = display.substr(0, suffix);
+        }
+        auto* item =
+            patches_submenu->Append(wxID_ANY, wxString::FromUTF8(display));
+        menu.Bind(
+            wxEVT_MENU,
+            [this, title_id = entry.title_id, bpf](wxCommandEvent&) {
+              auto* dlg = new PatchesDialog(wxGetTopLevelParent(this),
+                                            emulator_window_, title_id, bpf);
+              dlg->ShowModal();
+              dlg->Destroy();
+            },
+            item->GetId());
+      }
+      menu.AppendSubMenu(patches_submenu, _("Patches"));
+    }
+
+    auto* config_overrides = menu.Append(wxID_ANY, _("Config Overrides..."));
+    menu.Bind(
+        wxEVT_MENU,
+        [this, title_id = entry.title_id,
+         display_name = entry.title_name](wxCommandEvent&) {
+          auto* dlg =
+              new GameConfigDialog(wxGetTopLevelParent(this), emulator_window_,
+                                   title_id, display_name);
+          dlg->ShowModal();
+          dlg->Destroy();
+        },
+        config_overrides->GetId());
+
+    menu.AppendSeparator();
+    auto* compat = new wxMenu;
+    auto* canary = compat->Append(wxID_ANY, _("Canary"));
+    auto* master = compat->Append(wxID_ANY, _("Master"));
+    // Use the issue URL from the compat database when available; fall back to
+    // a GitHub issue-search query for titles not yet tracked.
+    std::string compat_url = GetCompatUrl(entry.title_id);
+    std::string compat_query = CompatSearchQuery(entry.title_id);
+    menu.Bind(
+        wxEVT_MENU,
+        [compat_url, compat_query](wxCommandEvent&) {
+          if (!compat_url.empty()) {
+            xe::LaunchWebBrowser(compat_url);
+          } else {
+            xe::LaunchWebBrowser(fmt::format(
+                "https://github.com/xenia-canary/game-compatibility/issues"
+                "?q=is%3Aissue+is%3Aopen+{}",
+                compat_query));
+          }
+        },
+        canary->GetId());
+    menu.Bind(
+        wxEVT_MENU,
+        [compat_query](wxCommandEvent&) {
+          xe::LaunchWebBrowser(fmt::format(
+              "https://github.com/xenia-project/game-compatibility/issues"
+              "?q=is%3Aissue+is%3Aopen+{}",
+              compat_query));
+        },
+        master->GetId());
+    auto* compat_item = menu.AppendSubMenu(compat, _("Compatibility"));
+    if (GetCompatState(entry.title_id) == CompatState::kUnknown) {
+      compat_item->Enable(false);
+    }
+
+    menu.AppendSeparator();
+    auto* remove = menu.Append(wxID_ANY, _("Remove from list"));
+    menu.Bind(
+        wxEVT_MENU,
+        [this, title_id = entry.title_id,
+         display_name = entry.title_name](wxCommandEvent&) {
+          wxString name = display_name.empty()
+                              ? wxString::Format(_("title %08X"), title_id)
+                              : wxString::FromUTF8(display_name);
+          wxString message = wxString::Format(
+              _("Remove %s from the list?\n\nThis only removes it from the "
+                "list in Xenia; game files on disk are kept."),
+              name);
+          int reply = wxMessageBox(message, _("Remove from list"),
+                                   wxYES_NO | wxICON_QUESTION,
+                                   wxGetTopLevelParent(this));
+          if (reply != wxYES) {
+            return;
+          }
+          auto* library =
+              emulator_window_ ? emulator_window_->game_library() : nullptr;
+          if (!library) {
+            return;
+          }
+          library->Remove(title_id);
+          Reload();
+        },
+        remove->GetId());
+  }
+
+  // 2px upward offset puts the cursor in the menu's top padding so X11's
+  // trailing right-release doesn't activate the first item.
+  // TODO(has207): retest on wxWidgets update — drop if PopupMenu starts
+  // anchoring via gtk_menu_popup_at_widget.
+  wxPoint pos = ScreenToClient(wxGetMousePosition());
+  pos.y -= 2;
+  PopupMenu(&menu, pos);
+}
+
+const GameListPanel::Entry* GameListPanel::SelectedEntry() const {
+  if (!list_) {
+    return nullptr;
+  }
+  int row = list_->GetSelectedRow();
+  if (row < 0 || row >= static_cast<int>(visible_indices_.size())) {
+    return nullptr;
+  }
+  size_t idx = visible_indices_[row];
+  if (idx >= entries_.size()) {
+    return nullptr;
+  }
+  return &entries_[idx];
+}
+
+std::filesystem::path GameListPanel::GetSelectedPath() const {
+  const Entry* e = SelectedEntry();
+  return e ? e->path : std::filesystem::path{};
+}
+
+void GameListPanel::MoveSelection(int delta) {
+  if (!list_ || visible_indices_.empty()) {
+    return;
+  }
+  int row_count = static_cast<int>(visible_indices_.size());
+  int row = list_->GetSelectedRow();
+  if (row < 0) {
+    row = (delta > 0) ? 0 : row_count - 1;
+  } else {
+    row = std::clamp(row + delta, 0, row_count - 1);
+  }
+  list_->SetFocus();
+  list_->SelectRow(row);
+  list_->EnsureVisible(list_->RowToItem(row));
+  if (selection_changed_cb_) {
+    selection_changed_cb_();
+  }
+}
+
+void GameListPanel::ActivateSelected() {
+  const Entry* e = SelectedEntry();
+  if (e && !e->path.empty()) {
+    LaunchOrPrompt(e->title_id, e->path);
+  }
+}
+
+void GameListPanel::FocusSearch() {
+  if (search_) {
+    search_->SetFocus();
+  }
+}
+
+void GameListPanel::OnColumnHeaderClick(wxDataViewEvent& event) {
+  int col = event.GetColumn();
+  if (col == 1) {
+    // Icon column doesn't sort.
+    return;
+  }
+  if (sort_column_ == col) {
+    sort_descending_ = !sort_descending_;
+  } else {
+    sort_column_ = col;
+    sort_descending_ = false;
+  }
+  // Don't call SetSortOrder/UnsetAsSortKey here: on GTK that flips an
+  // internal flag that makes wxDataViewCtrl auto-resort children on every
+  // InsertLeaf using the model's default variant Compare, which clobbers
+  // the order we set up in Repopulate (and falls back to item-id pointer
+  // order for non-text columns, so reverse never reverses).
+  Repopulate();
+}
+
+void GameListPanel::SortEntries() {
+  if (sort_column_ < 0) {
+    return;
+  }
+  auto cmp = [this](const Entry& a, const Entry& b) -> bool {
+    auto less_then = [this](bool a_lt_b) {
+      return sort_descending_ ? !a_lt_b : a_lt_b;
+    };
+    switch (sort_column_) {
+      case 0: {  // Compat — ascending puts best (Playable) at top.
+        auto sa = static_cast<uint8_t>(GetEntryCompatState(a));
+        auto sb = static_cast<uint8_t>(GetEntryCompatState(b));
+        if (sa != sb) {
+          return less_then(sa > sb);
+        }
+        // Tiebreak by title so order within a bucket is stable and reverse
+        // sort flips cleanly (no equal-element comparator ambiguity).
+        auto la = ToLower(a.title_name);
+        auto lb = ToLower(b.title_name);
+        return less_then(la < lb);
+      }
+      case 2: {  // Title
+        auto la = ToLower(a.title_name);
+        auto lb = ToLower(b.title_name);
+        return less_then(la < lb);
+      }
+      case 3: {  // Achievements — unlocked count, then total as tiebreak.
+        if (a.achievements_unlocked != b.achievements_unlocked) {
+          return less_then(a.achievements_unlocked < b.achievements_unlocked);
+        }
+        return less_then(a.achievements_total < b.achievements_total);
+      }
+      case 4: {  // Gamerscore — earned, then total as tiebreak.
+        if (a.gamerscore_earned != b.gamerscore_earned) {
+          return less_then(a.gamerscore_earned < b.gamerscore_earned);
+        }
+        return less_then(a.gamerscore_total < b.gamerscore_total);
+      }
+      case 5:  // Last Played
+        return less_then(a.last_run_time < b.last_run_time);
+      default:
+        return false;
+    }
+  };
+  std::stable_sort(entries_.begin(), entries_.end(), cmp);
+}
+
+void GameListPanel::Repopulate() {
+  SortEntries();
+  list_->DeleteAllItems();
+  visible_indices_.clear();
+  visible_indices_.reserve(entries_.size());
+
+  for (size_t i = 0; i < entries_.size(); ++i) {
+    const auto& e = entries_[i];
+    if (!filter_lower_.empty()) {
+      std::string title_lower = ToLower(e.title_name);
+      std::string path_lower = ToLower(xe::path_to_utf8(e.path));
+      if (title_lower.find(filter_lower_) == std::string::npos &&
+          path_lower.find(filter_lower_) == std::string::npos) {
+        continue;
+      }
+    }
+
+    wxString base_title = e.title_name.empty()
+                              ? _("File Corrupted")
+                              : wxString::FromUTF8(e.title_name);
+    wxString disc_suffix;
+    if (e.discs.size() > 1) {
+      disc_suffix = wxString::Format(_(" (%zu discs)"), e.discs.size());
+    }
+
+    wxVector<wxVariant> row;
+    wxVariant compat_variant;
+    compat_variant
+        << compat_balls_[static_cast<size_t>(GetEntryCompatState(e))];
+    row.push_back(compat_variant);
+    wxVariant icon_variant;
+    icon_variant << (e.icon.IsOk() ? e.icon : not_played_placeholder_);
+    row.push_back(icon_variant);
+    wxString title_markup =
+        "<b><span size='x-large'>" + EscapeMarkup(base_title) + "</span></b>";
+    if (!disc_suffix.empty()) {
+      title_markup += EscapeMarkup(disc_suffix);
+    }
+    row.push_back(wxVariant(title_markup));
+    // SPA-driven totals aren't known until first launch — "?" instead of
+    // a misleading 0/0 for titles that have never been launched.
+    std::string achievements_text;
+    std::string gamerscore_text;
+    if (e.achievements_total > 0 || e.last_run_time != 0) {
+      achievements_text =
+          fmt::format("{}/{}", e.achievements_unlocked, e.achievements_total);
+      gamerscore_text =
+          fmt::format("{}/{} G", e.gamerscore_earned, e.gamerscore_total);
+    } else {
+      achievements_text = "?";
+      gamerscore_text = "?";
+    }
+    row.push_back(wxVariant(wxString::FromUTF8(achievements_text)));
+    row.push_back(wxVariant(wxString::FromUTF8(gamerscore_text)));
+    row.push_back(
+        wxVariant(wxString::FromUTF8(FormatLastPlayed(e.last_run_time))));
+    list_->AppendItem(row);
+    visible_indices_.push_back(i);
+  }
+}
+
+}  // namespace app
+}  // namespace xe

@@ -1,0 +1,118 @@
+# ==============================================================================
+# Misc system junk
+# ==============================================================================
+
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.com.apple.*
+Thumbs.db
+Desktop.ini
+.svn
+
+# Microprofile settings
+.microprofilepreset.*
+
+# ==============================================================================
+# Projects/IDE files
+# ==============================================================================
+
+*~
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# VIM
+.*.sw[a-z]
+*.un~
+Session.vim
+
+# TextMate
+*.tmproj
+*.tmproject
+tmtags
+
+# Eclipse
+.project
+.metadata
+
+# WebStorm
+.idea
+
+# VS
+.vs
+*.user
+*.sdf
+*.opensdf
+*.suo
+bin/
+obj/
+
+# VSCode
+.vscode
+
+# ==============================================================================
+# Temp generated code
+# ==============================================================================
+
+*.py[co]
+.coverage
+*.o
+*.aps
+
+# ==============================================================================
+# Logs and dumps
+# ==============================================================================
+
+npm-debug.log
+private/
+*.trace
+imgui.ini
+
+# ==============================================================================
+# Build system output
+# ==============================================================================
+
+# npm/node
+.lock-wscript
+node_modules/
+
+# coverage/etc
+/scratch/
+
+# CMake build trees
+/build/
+/build-vs/
+/build-arm64/
+/build-x64/
+
+# Downloaded Slang shader compiler (xenia-build.py ensure_slangc)
+/.slang/
+
+# CMake user-specific overrides + compile commands export
+CMakeUserPresets.json
+/compile_commands.json
+
+# ==============================================================================
+# Local-only paths
+# ==============================================================================
+
+.vagrant
+/attic/
+/content/
+/third_party/binutils/binutils-2.24.tar.gz
+/third_party/binutils/binutils-2.24/
+/third_party/binutils/bin/
+/third_party/binutils/powerpc-none-elf/
+/third_party/binutils/share/
+/third_party/vasm/
+/tools/shader-playground/*.dll
+/profile_print_times.py
+/profile_times.txt
+/cache
+/cache1
+/cache0
+/devkit
+recent.toml

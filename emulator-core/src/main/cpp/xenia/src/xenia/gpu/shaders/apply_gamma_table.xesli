@@ -1,0 +1,68 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include "../../ui/shaders/xesl.xesli"
+
+#ifdef XE_APPLY_GAMMA_FXAA_LUMA
+  #define XE_APPLY_GAMMA_DEST_FORMAT image_format_rgba16f_xe
+  #define XE_APPLY_GAMMA_DEST_FORMAT_SPIRV "rgba16f"
+#else
+  #define XE_APPLY_GAMMA_DEST_FORMAT image_format_rgb10_a2_xe
+  #define XE_APPLY_GAMMA_DEST_FORMAT_SPIRV "rgb10_a2"
+#endif
+push_const_begin_xe(b0, space0)
+  uint2_xe xe_apply_gamma_size;
+push_const_end_xe
+#define LOCAL_SIZE_X_XE 16
+#define LOCAL_SIZE_Y_XE 8
+#define LOCAL_SIZE_Z_XE 1
+entry_bindings_begin_compute_xe
+  push_const_binding_xe(buffer(0))
+  entry_binding_next_xe
+  texture_xe(texture_buffer_xe, xe_apply_gamma_ramp, 0, 0, t0,
+             space0, texture(0))
+  entry_binding_next_xe
+  texture_xe(texture_2d_xe, xe_apply_gamma_source, 1, 0, t1,
+             space0, texture(1))
+  entry_binding_next_xe
+  image_wo_xe(image_2d_xe, XE_APPLY_GAMMA_DEST_FORMAT,
+              XE_APPLY_GAMMA_DEST_FORMAT_SPIRV, xe_apply_gamma_dest,
+              2, 0, u0, space0, texture(2))
+entry_bindings_end_inputs_begin_compute_xe
+  entry_in_global_thread_id_xe
+entry_inputs_end_code_begin_compute_xe
+  uint2_xe pixel_index = in_global_thread_id_xe.xy;
+  dont_flatten_xe
+  if (any(greater_than_equal_xe(pixel_index,
+                                push_const_xe(xe_apply_gamma_size)))) {
+    return;
+  }
+  // UNORM conversion according to the Direct3D 10+ rules.
+  uint3_xe apply_gamma_input = uint3_xe(
+      texel_fetch_2d_xe(xe_apply_gamma_source, pixel_index, 0).rgb * 255.0f +
+      0.5f);
+  // The ramp has blue in bits 0:9, green in 10:19, red in 20:29 - BGR passed as
+  // an R10G10B10A2 buffer.
+  float4_xe apply_gamma_output;
+  apply_gamma_output.r =
+      texel_fetch_buffer_xe(xe_apply_gamma_ramp, apply_gamma_input.r).b;
+  apply_gamma_output.g =
+      texel_fetch_buffer_xe(xe_apply_gamma_ramp, apply_gamma_input.g).g;
+  apply_gamma_output.b =
+      texel_fetch_buffer_xe(xe_apply_gamma_ramp, apply_gamma_input.b).r;
+  #ifdef XE_APPLY_GAMMA_FXAA_LUMA
+    // Perceptual luma.
+    apply_gamma_output.a =
+        dot(apply_gamma_output.rgb, float3_xe(0.299f, 0.587f, 0.114f));
+  #else
+    // Perceptual luma.
+    apply_gamma_output.a = 1.0f;
+  #endif
+  image_store_2d_rgba_xe(xe_apply_gamma_dest, pixel_index, apply_gamma_output);
+entry_code_end_compute_xe
