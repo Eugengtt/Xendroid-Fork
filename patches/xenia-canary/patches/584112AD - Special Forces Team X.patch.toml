@@ -1,0 +1,36 @@
+title_name = "Special Forces: Team X" # STX
+title_id = "584112AD" # XA-4781
+hash = "85ED9017257345C5" # default.xex
+#media_id = "24787C31" # XBLA: 1C09F852A0E6C4802216A7ADFC6B92EF849C743458
+
+[[patch]]
+    name = "Unlock FPS"
+    desc = "See note about framerate patches in the README."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x825270c0
+        value = 0x60000000
+    [[patch.be8]]
+        address = 0x82acfa3f
+        value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Disable Motion Blur"
+    desc = "Far depth of field becomes stronger as a downside."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82409c40
+        value = 0x39600000
+
+[[patch]]
+    name = "16x Anisotropic Filtering"
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82950a6c
+        value = 0x38a00010

@@ -1,0 +1,1286 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#ifndef XENIA_GPU_VULKAN_VULKAN_COMMAND_PROCESSOR_H_
+#define XENIA_GPU_VULKAN_VULKAN_COMMAND_PROCESSOR_H_
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <climits>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <map>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include "xenia/base/assert.h"
+#include "xenia/base/hash.h"
+#include "xenia/gpu/command_processor.h"
+#include "xenia/gpu/draw_util.h"
+#include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/registers.h"
+#include "xenia/gpu/spirv_shader_translator.h"
+#include "xenia/gpu/vulkan/deferred_command_buffer.h"
+#include "xenia/gpu/vulkan/vulkan_graphics_system.h"
+#include "xenia/gpu/vulkan/vulkan_pipeline_cache.h"
+#include "xenia/gpu/vulkan/vulkan_primitive_processor.h"
+#include "xenia/gpu/vulkan/vulkan_render_target_cache.h"
+#include "xenia/gpu/vulkan/vulkan_shader.h"
+#include "xenia/gpu/vulkan/vulkan_shared_memory.h"
+#include "xenia/gpu/vulkan/vulkan_texture_cache.h"
+#include "xenia/gpu/vulkan/vulkan_zpd_query_pool.h"
+#include "xenia/gpu/xenos.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/ui/vulkan/linked_type_descriptor_set_allocator.h"
+#include "xenia/ui/vulkan/vulkan_descriptor_pool_chain.h"
+#include "xenia/ui/vulkan/vulkan_gpu_completion_timeline.h"
+#include "xenia/ui/vulkan/vulkan_presenter.h"
+#include "xenia/ui/vulkan/vulkan_provider.h"
+#include "xenia/ui/vulkan/vulkan_upload_buffer_pool.h"
+
+DECLARE_bool(log_gpu_frame_time_breakdown);
+
+namespace xe {
+namespace gpu {
+namespace vulkan {
+
+class VulkanCommandProcessor final : public CommandProcessor {
+ protected:
+#define OVERRIDING_BASE_CMDPROCESSOR
+#include "../pm4_command_processor_declare.h"
+#undef OVERRIDING_BASE_CMDPROCESSOR
+ public:
+  // Single-descriptor layouts for use within a single frame.
+  enum class SingleTransientDescriptorLayout {
+    kStorageBufferCompute,
+    kStorageBufferFragment,
+    // Uniform buffer at binding 1 for shaders that keep binding 0 as push
+    // constants for D3D-style root constants.
+    kUniformBufferComputeB1,
+    // Storage image at binding 0 for the resolve-to-texture fragment variant.
+    kStorageImageFragment,
+    kCount,
+  };
+
+  class ScratchBufferAcquisition {
+   public:
+    explicit ScratchBufferAcquisition() = default;
+    explicit ScratchBufferAcquisition(VulkanCommandProcessor& command_processor,
+                                      VkBuffer buffer,
+                                      VkPipelineStageFlags stage_mask,
+                                      VkAccessFlags access_mask)
+        : command_processor_(&command_processor),
+          buffer_(buffer),
+          stage_mask_(stage_mask),
+          access_mask_(access_mask) {}
+
+    ScratchBufferAcquisition(const ScratchBufferAcquisition& acquisition) =
+        delete;
+    ScratchBufferAcquisition& operator=(
+        const ScratchBufferAcquisition& acquisition) = delete;
+
+    ScratchBufferAcquisition(ScratchBufferAcquisition&& acquisition) {
+      command_processor_ = acquisition.command_processor_;
+      buffer_ = acquisition.buffer_;
+      stage_mask_ = acquisition.stage_mask_;
+      access_mask_ = acquisition.access_mask_;
+      acquisition.command_processor_ = nullptr;
+      acquisition.buffer_ = VK_NULL_HANDLE;
+      acquisition.stage_mask_ = 0;
+      acquisition.access_mask_ = 0;
+    }
+    ScratchBufferAcquisition& operator=(
+        ScratchBufferAcquisition&& acquisition) {
+      if (this == &acquisition) {
+        return *this;
+      }
+      command_processor_ = acquisition.command_processor_;
+      buffer_ = acquisition.buffer_;
+      stage_mask_ = acquisition.stage_mask_;
+      access_mask_ = acquisition.access_mask_;
+      acquisition.command_processor_ = nullptr;
+      acquisition.buffer_ = VK_NULL_HANDLE;
+      acquisition.stage_mask_ = 0;
+      acquisition.access_mask_ = 0;
+      return *this;
+    }
+
+    ~ScratchBufferAcquisition() {
+      if (buffer_ != VK_NULL_HANDLE) {
+        assert_true(command_processor_->scratch_buffer_used_);
+        assert_true(command_processor_->scratch_buffer_ == buffer_);
+        command_processor_->scratch_buffer_last_stage_mask_ = stage_mask_;
+        command_processor_->scratch_buffer_last_access_mask_ = access_mask_;
+        command_processor_->scratch_buffer_last_usage_submission_ =
+            command_processor_->GetCurrentSubmission();
+        command_processor_->scratch_buffer_used_ = false;
+      }
+    }
+
+    // VK_NULL_HANDLE if failed to acquire or if moved.
+    VkBuffer buffer() const { return buffer_; }
+
+    VkPipelineStageFlags GetStageMask() const { return stage_mask_; }
+    VkPipelineStageFlags SetStageMask(VkPipelineStageFlags new_stage_mask) {
+      VkPipelineStageFlags old_stage_mask = stage_mask_;
+      stage_mask_ = new_stage_mask;
+      return old_stage_mask;
+    }
+    VkAccessFlags GetAccessMask() const { return access_mask_; }
+    VkAccessFlags SetAccessMask(VkAccessFlags new_access_mask) {
+      VkAccessFlags old_access_mask = access_mask_;
+      access_mask_ = new_access_mask;
+      return old_access_mask;
+    }
+
+   private:
+    VulkanCommandProcessor* command_processor_ = nullptr;
+    VkBuffer buffer_ = VK_NULL_HANDLE;
+    VkPipelineStageFlags stage_mask_ = 0;
+    VkAccessFlags access_mask_ = 0;
+  };
+
+  VulkanCommandProcessor(VulkanGraphicsSystem* graphics_system,
+                         kernel::KernelState* kernel_state);
+  ~VulkanCommandProcessor();
+
+  void ClearCaches() override;
+  void InvalidateGpuMemory() override;
+
+  void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) override;
+
+  void InitializeShaderStorage(
+      const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+      std::function<void()> completion_callback = nullptr) override;
+
+  void RestoreEdramSnapshot(const void* snapshot) override;
+
+  void PollCompletedSubmission() override;
+
+  ui::vulkan::VulkanDevice* GetVulkanDevice() const {
+    return static_cast<const ui::vulkan::VulkanProvider*>(
+               graphics_system_->provider())
+        ->vulkan_device();
+  }
+
+  // Returns the deferred drawing command list for the currently open
+  // submission.
+  DeferredCommandBuffer& deferred_command_buffer() {
+    assert_true(submission_open_);
+    return deferred_command_buffer_;
+  }
+
+  // Deferred commands replayed at the head of the submission's command
+  // buffer, before deferred_command_buffer() - holds shared-memory uploads
+  // hoisted out of render passes.
+  DeferredCommandBuffer& deferred_setup_command_buffer() {
+    assert_true(submission_open_);
+    return deferred_setup_command_buffer_;
+  }
+
+  bool submission_open() const { return submission_open_; }
+  bool in_render_pass() const { return in_render_pass_; }
+  uint64_t GetCurrentSubmission() const {
+    return completion_timeline_.GetUpcomingSubmission();
+  }
+  uint64_t GetCompletedSubmission() const override {
+    return completion_timeline_.GetCompletedSubmissionFromLastUpdate();
+  }
+
+  // Sparse binds are:
+  // - In a single submission, all submitted in one vkQueueBindSparse.
+  // - Sent to the queue without waiting for a semaphore.
+  // Thus, multiple sparse binds between the completed and the current
+  // submission, and within one submission, must not touch any overlapping
+  // memory regions.
+  void SparseBindBuffer(VkBuffer buffer, uint32_t bind_count,
+                        const VkSparseMemoryBind* binds,
+                        VkPipelineStageFlags wait_stage_mask);
+
+  uint64_t GetCurrentFrame() const { return frame_current_; }
+  uint64_t GetCompletedFrame() const { return frame_completed_; }
+
+  // Submission must be open to insert barriers. If no pipeline stages access
+  // the resource in a synchronization scope, the stage masks should be 0 (top /
+  // bottom of pipe should be specified only if explicitly needed). Returning
+  // true if the barrier has actually been inserted and not dropped.
+  bool PushBufferMemoryBarrier(
+      VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size,
+      VkPipelineStageFlags src_stage_mask, VkPipelineStageFlags dst_stage_mask,
+      VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask,
+      uint32_t src_queue_family_index = VK_QUEUE_FAMILY_IGNORED,
+      uint32_t dst_queue_family_index = VK_QUEUE_FAMILY_IGNORED,
+      bool skip_if_equal = true);
+  bool PushImageMemoryBarrier(
+      VkImage image, const VkImageSubresourceRange& subresource_range,
+      VkPipelineStageFlags src_stage_mask, VkPipelineStageFlags dst_stage_mask,
+      VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask,
+      VkImageLayout old_layout, VkImageLayout new_layout,
+      uint32_t src_queue_family_index = VK_QUEUE_FAMILY_IGNORED,
+      uint32_t dst_queue_family_index = VK_QUEUE_FAMILY_IGNORED,
+      bool skip_if_equal = true);
+  // Returns whether any barriers have been submitted - if true is returned, the
+  // render pass will also be closed.
+  bool SubmitBarriers(bool force_end_render_pass);
+
+  // If [base_bytes, base_bytes + size_bytes) holds memexport output (which
+  // under two-buffer routing lives in the host-imported buffer aliasing guest
+  // RAM), copies it into the device-local buffer so a following device-buffer
+  // read - a texture load - sees it. No-op for non-memexport ranges (already in
+  // the device buffer) and when the host buffer is unavailable. Called by the
+  // texture cache before loading a texture. Ends the render pass.
+  // Returns whether it copied, so an upload of the same range can be skipped.
+  bool EnsureMemexportRangeInDeviceBuffer(uint32_t base_bytes,
+                                          uint32_t size_bytes);
+
+  // If not started yet, begins a render pass from the render target cache.
+  // Submission must be open.
+  void SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+      VkRenderPass render_pass,
+      const VulkanRenderTargetCache::Framebuffer* framebuffer);
+  // Overload for transfer operations with dynamic rendering.
+  // transfer_dest_view is the destination render target view for the transfer.
+  void SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+      VkRenderPass render_pass,
+      const VulkanRenderTargetCache::Framebuffer* framebuffer,
+      VkImageView transfer_dest_view, bool transfer_dest_is_depth);
+  // Must be called before doing anything outside the render pass scope,
+  // including adding pipeline barriers that are not a part of the render pass
+  // scope. Submission must be open.
+  void EndRenderPass();
+
+  VkDescriptorSetLayout GetSingleTransientDescriptorLayout(
+      SingleTransientDescriptorLayout transient_descriptor_layout) const {
+    return descriptor_set_layouts_single_transient_[size_t(
+        transient_descriptor_layout)];
+  }
+  // A frame must be open.
+  VkDescriptorSet AllocateSingleTransientDescriptor(
+      SingleTransientDescriptorLayout transient_descriptor_layout);
+
+  // The returned reference is valid until a cache clear.
+  VkDescriptorSetLayout GetTextureDescriptorSetLayout(bool is_vertex,
+                                                      size_t texture_count,
+                                                      size_t sampler_count);
+  // The returned reference is valid until a cache clear.
+  const VulkanPipelineCache::PipelineLayoutProvider* GetPipelineLayout(
+      size_t texture_count_pixel, size_t sampler_count_pixel,
+      size_t texture_count_vertex, size_t sampler_count_vertex);
+
+  // Returns a single temporary GPU-side buffer within a submission for tasks
+  // like texture untiling and resolving. May push a buffer memory barrier into
+  // the initial usage. Submission must be open.
+  ScratchBufferAcquisition AcquireScratchGpuBuffer(
+      VkDeviceSize size, VkPipelineStageFlags initial_stage_mask,
+      VkAccessFlags initial_access_mask);
+
+  // Binds a graphics pipeline for host-specific purposes, invalidating the
+  // affected state. keep_dynamic_* must be false (to invalidate the dynamic
+  // state after binding the pipeline with the same state being static, or if
+  // the caller changes the dynamic state bypassing the VulkanCommandProcessor)
+  // unless the caller has these state variables as dynamic and uses the
+  // tracking in VulkanCommandProcessor to modify them.
+  void BindExternalGraphicsPipeline(VkPipeline pipeline,
+                                    bool keep_dynamic_depth_bias = false,
+                                    bool keep_dynamic_blend_constants = false,
+                                    bool keep_dynamic_stencil_mask_ref = false);
+  void BindExternalComputePipeline(VkPipeline pipeline);
+  void SetViewport(const VkViewport& viewport);
+  void SetScissor(const VkRect2D& scissor);
+
+  std::string GetTitleStateSuffix() const override;
+
+  // Debug marker methods - public so subsystems can annotate their operations.
+  void PushDebugMarker(const char* format, ...);
+  void PopDebugMarker();
+  void InsertDebugMarker(const char* format, ...);
+  bool debug_markers_enabled() const { return debug_markers_enabled_; }
+
+ protected:
+  bool SetupContext() override;
+  void ShutdownContext() override;
+  XE_FORCEINLINE
+  void WriteRegister(uint32_t index, uint32_t value) override;
+  XE_FORCEINLINE
+  virtual void WriteRegistersFromMem(uint32_t start_index, uint32_t* base,
+                                     uint32_t num_registers) override;
+  void WriteRegisterRangeFromRing(xe::RingBuffer* ring, uint32_t base,
+                                  uint32_t num_registers) override;
+
+  // Range-segmented register write fast path (port of the D3D12 backend's
+  // WriteRegisterRangeFromMem machinery, cvar vulkan_fast_register_ranges):
+  // ranges with no side effects are bulk copy_and_swap'ed into the register
+  // file, the constant families get range-level dirty handling instead of the
+  // per-register virtual WriteRegister cascade.
+  void WriteShaderConstantsFromMem(uint32_t start_index, uint32_t* base,
+                                   uint32_t num_registers);
+  void WriteBoolLoopFromMem(uint32_t start_index, uint32_t* base,
+                            uint32_t num_registers);
+  void WriteFetchFromMem(uint32_t start_index, uint32_t* base,
+                         uint32_t num_registers);
+  void WritePossiblySpecialRegistersFromMem(uint32_t start_index,
+                                            uint32_t* base,
+                                            uint32_t num_registers);
+  XE_NOINLINE
+  void WriteRegisterRangeFromRing_WraparoundCase(xe::RingBuffer* ring,
+                                                 uint32_t base,
+                                                 uint32_t num_registers);
+
+  void OnGammaRamp256EntryTableValueWritten() override;
+  void OnGammaRampPWLValueWritten() override;
+
+  void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                 uint32_t frontbuffer_height) override;
+
+  void OnPrimaryBufferEnd() override;
+
+  Shader* LoadShader(xenos::ShaderType shader_type,
+                     const uint32_t* host_address,
+                     uint32_t dword_count) override;
+
+  bool IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
+                 IndexBufferInfo* index_buffer_info,
+                 bool major_mode_explicit) override;
+  bool IssueCopy() override;
+
+  void InitializeTrace() override;
+
+ private:
+  struct CommandBuffer {
+    VkCommandPool pool;
+    VkCommandBuffer buffer;
+  };
+
+  struct SparseBufferBind {
+    VkBuffer buffer;
+    size_t bind_offset;
+    uint32_t bind_count;
+  };
+
+  union TextureDescriptorSetLayoutKey {
+    uint32_t key;
+    struct {
+      // If texture and sampler counts are both 0, use
+      // descriptor_set_layout_empty_ instead as these are owning references.
+      uint32_t texture_count : 16;
+      uint32_t sampler_count : 15;
+      uint32_t is_vertex : 1;
+    };
+
+    TextureDescriptorSetLayoutKey() : key(0) {
+      static_assert_size(*this, sizeof(key));
+    }
+
+    struct Hasher {
+      size_t operator()(const TextureDescriptorSetLayoutKey& key) const {
+        return std::hash<decltype(key.key)>{}(key.key);
+      }
+    };
+    bool operator==(const TextureDescriptorSetLayoutKey& other_key) const {
+      return key == other_key.key;
+    }
+    bool operator!=(const TextureDescriptorSetLayoutKey& other_key) const {
+      return !(*this == other_key);
+    }
+  };
+
+  union PipelineLayoutKey {
+    uint64_t key;
+    struct {
+      // Pixel textures in the low bits since those are varied much more
+      // commonly.
+      uint16_t texture_count_pixel;
+      uint16_t sampler_count_pixel;
+      uint16_t texture_count_vertex;
+      uint16_t sampler_count_vertex;
+    };
+
+    PipelineLayoutKey() : key(0) { static_assert_size(*this, sizeof(key)); }
+
+    struct Hasher {
+      size_t operator()(const PipelineLayoutKey& key) const {
+        return std::hash<decltype(key.key)>{}(key.key);
+      }
+    };
+    bool operator==(const PipelineLayoutKey& other_key) const {
+      return key == other_key.key;
+    }
+    bool operator!=(const PipelineLayoutKey& other_key) const {
+      return !(*this == other_key);
+    }
+  };
+
+  class PipelineLayout : public VulkanPipelineCache::PipelineLayoutProvider {
+   public:
+    explicit PipelineLayout(
+        VkPipelineLayout pipeline_layout,
+        VkDescriptorSetLayout descriptor_set_layout_textures_vertex_ref,
+        VkDescriptorSetLayout descriptor_set_layout_textures_pixel_ref,
+        uint32_t texture_count_vertex, uint32_t sampler_count_vertex,
+        uint32_t texture_count_pixel, uint32_t sampler_count_pixel)
+        : pipeline_layout_(pipeline_layout),
+          descriptor_set_layout_textures_vertex_ref_(
+              descriptor_set_layout_textures_vertex_ref),
+          descriptor_set_layout_textures_pixel_ref_(
+              descriptor_set_layout_textures_pixel_ref),
+          texture_count_vertex_(texture_count_vertex),
+          sampler_count_vertex_(sampler_count_vertex),
+          texture_count_pixel_(texture_count_pixel),
+          sampler_count_pixel_(sampler_count_pixel) {}
+    VkPipelineLayout GetPipelineLayout() const override {
+      return pipeline_layout_;
+    }
+    VkDescriptorSetLayout descriptor_set_layout_textures_vertex_ref() const {
+      return descriptor_set_layout_textures_vertex_ref_;
+    }
+    VkDescriptorSetLayout descriptor_set_layout_textures_pixel_ref() const {
+      return descriptor_set_layout_textures_pixel_ref_;
+    }
+    // The binding counts the texture set layouts were built for - lets the
+    // draw path verify a set allocation against the layout it will use.
+    uint32_t texture_count_vertex() const { return texture_count_vertex_; }
+    uint32_t sampler_count_vertex() const { return sampler_count_vertex_; }
+    uint32_t texture_count_pixel() const { return texture_count_pixel_; }
+    uint32_t sampler_count_pixel() const { return sampler_count_pixel_; }
+
+   private:
+    VkPipelineLayout pipeline_layout_;
+    VkDescriptorSetLayout descriptor_set_layout_textures_vertex_ref_;
+    VkDescriptorSetLayout descriptor_set_layout_textures_pixel_ref_;
+    uint32_t texture_count_vertex_;
+    uint32_t sampler_count_vertex_;
+    uint32_t texture_count_pixel_;
+    uint32_t sampler_count_pixel_;
+  };
+
+  struct UsedSingleTransientDescriptor {
+    uint64_t frame;
+    SingleTransientDescriptorLayout layout;
+    VkDescriptorSet set;
+  };
+
+  struct UsedTextureTransientDescriptorSet {
+    uint64_t frame;
+    TextureDescriptorSetLayoutKey layout;
+    VkDescriptorSet set;
+  };
+
+  enum SwapApplyGammaDescriptorSet : uint32_t {
+    kSwapApplyGammaDescriptorSetRamp,
+    kSwapApplyGammaDescriptorSetSource,
+    kSwapApplyGammaDescriptorSetDest,
+
+    kSwapApplyGammaDescriptorSetCount,
+  };
+
+  // BeginSubmission and EndSubmission may be called at any time. If there's an
+  // open non-frame submission, BeginSubmission(true) will promote it to a
+  // frame. EndSubmission(true) will close the frame no matter whether the
+  // submission has already been closed.
+  // Unlike on Direct3D 12, submission boundaries do not imply any memory
+  // barriers aside from an incoming host write (but not outgoing host read)
+  // dependency.
+
+  // Rechecks submission number and reclaims per-submission resources. Pass 0 as
+  // the submission to await to simply check status, or pass
+  // GetCurrentSubmission() to wait for all queue operations to be completed.
+  void CheckSubmissionCompletionAndDeviceLoss(uint64_t await_submission);
+  // If is_guest_command is true, a new full frame - with full cleanup of
+  // resources and, if needed, starting capturing - is opened if pending (as
+  // opposed to simply resuming after mid-frame synchronization). Returns
+  // whether a submission is open currently and the device is not lost.
+  bool BeginSubmission(bool is_guest_command);
+  // If is_swap is true, a full frame is closed - with, if needed, cache
+  // clearing and stopping capturing. Returns whether the submission was done
+  // successfully, if it has failed, leaves it open.
+  bool EndSubmission(bool is_swap);
+  // Checks if ending a submission right now would not cause potentially more
+  // delay than it would reduce - such as when there are unfinished graphics
+  // pipeline creation requests.
+  bool CanEndSubmissionImmediately() const;
+  bool AwaitAllQueueOperationsCompletion() {
+    CheckSubmissionCompletionAndDeviceLoss(GetCurrentSubmission());
+    return !submission_open_ &&
+           GetCompletedSubmission() + 1u >= GetCurrentSubmission();
+  }
+
+  void ClearTransientDescriptorPools();
+
+  void SplitPendingBarrier();
+
+  void DestroyScratchBuffer();
+
+  // ZPD occlusion queries backend.
+  // vkCmdBeginQuery is only valid inside a render pass, so segments split at
+  // pass end and resume at the next pass begin. If BEGIN fires outside a pass,
+  // segment_pending_begin waits for the next. Outside a render pass,
+  // DiscardZPDQuery defers the slot release until the submission completes.
+  // FSI queries clear a dedicated counter with vkCmdFillBuffer, so they may
+  // need to open before a pass begins or split an active pass around the clear.
+
+  void EnsureZPDQueryResources() override;
+  void ShutdownZPDQueryResources() override {
+    zpd_resolves_in_flight_.clear();
+    zpd_deferred_releases_.clear();
+    zpd_active_query_index_ = UINT32_MAX;
+    zpd_active_query_generation_ = 0;
+    zpd_active_query_is_fsi_ = false;
+    zpd_fsi_counter_index_force_update_ = true;
+    if (zpd_host_query_pool_) {
+      zpd_host_query_pool_->Shutdown();
+    }
+  }
+
+  bool IsZPDQueryPoolReady() const override;
+  bool CanOpenZPDQuery() const override;
+
+  QueryOpenResult OpenZPDQuery(ReportHandle report_handle,
+                               bool can_close_submission) override;
+  bool CloseZPDQuery(ReportHandle report_handle,
+                     uint64_t& out_submission) override;
+  bool DiscardZPDQuery() override;
+  void PumpQueryResolves() override;
+  bool AwaitQueryResolve(ReportHandle report_handle,
+                         uint64_t wait_for_submission) override;
+
+  void UpdateDynamicState(
+      const draw_util::ViewportInfo& viewport_info, bool primitive_polygonal,
+      reg::RB_DEPTHCONTROL normalized_depth_control,
+      uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y,
+      bool depth_bias_in_pixel_shader,
+      const VulkanPipelineCache::DynamicState& pipeline_dynamic_state);
+  void UpdateSystemConstantValues(
+      bool primitive_polygonal,
+      const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+      bool shader_32bit_index_dma, const draw_util::ViewportInfo& viewport_info,
+      uint32_t used_texture_mask, reg::RB_DEPTHCONTROL normalized_depth_control,
+      uint32_t normalized_color_mask,
+      const draw_util::HostDepthPolygonOffset* host_depth_polygon_offset);
+  // *_bindings_ready is IssueDraw's per-draw readiness snapshot, the same one
+  // the sampler collection used - re-reading bindings_ready() here would race
+  // translation finishing mid-draw.
+  bool UpdateBindings(const VulkanShader* vertex_shader,
+                      const VulkanShader* pixel_shader,
+                      bool vertex_bindings_ready, bool pixel_bindings_ready,
+                      bool interpreter_placeholder = false,
+                      bool placeholder_pixel_shader = false);
+  // Allocates a descriptor set and fills one or two VkWriteDescriptorSet
+  // structure instances (for images and samplers).
+  // The descriptor set layout must be the one for the given is_vertex,
+  // texture_count, sampler_count (from GetTextureDescriptorSetLayout - may be
+  // already available at the moment of the call, no need to locate it again).
+  // Returns how many VkWriteDescriptorSet structure instances have been
+  // written, or 0 if there was a failure to allocate the descriptor set or no
+  // bindings were requested.
+  uint32_t WriteTransientTextureBindings(
+      bool is_vertex, uint32_t texture_count, uint32_t sampler_count,
+      VkDescriptorSetLayout descriptor_set_layout,
+      const VkDescriptorImageInfo* texture_image_info,
+      const VkDescriptorImageInfo* sampler_image_info,
+      VkWriteDescriptorSet* descriptor_set_writes_out);
+
+  bool device_lost_ = false;
+
+  // Rolling per-submission summary for diagnosing VK_ERROR_DEVICE_LOST.
+  // Accumulated into submission_in_progress_ during a submission, snapshotted
+  // into submission_history_ on successful submit, dumped on device-loss.
+  struct SubmissionSummary {
+    uint64_t submission_index = 0;
+    uint64_t frame_index = 0;
+    uint32_t draw_count = 0;
+    uint32_t dispatch_count = 0;
+    uint32_t resolve_count = 0;
+    uint64_t last_vs_hash = 0;
+    uint64_t last_ps_hash = 0;
+    uint64_t last_render_pass_key = 0;
+  };
+  static constexpr size_t kSubmissionHistorySize = 16;
+  std::array<SubmissionSummary, kSubmissionHistorySize> submission_history_{};
+  size_t submission_history_next_ = 0;
+  SubmissionSummary submission_in_progress_{};
+
+  void LogRecentSubmissions(const char* context);
+
+  bool cache_clear_requested_ = false;
+
+  // Host shader types that guest shaders can be translated into - they can
+  // access the shared memory (via vertex fetch, memory export, or manual index
+  // buffer reading) and textures.
+  VkPipelineStageFlags guest_shader_pipeline_stages_ = 0;
+  VkShaderStageFlags guest_shader_vertex_stages_ = 0;
+
+  std::vector<VkSemaphore> semaphores_free_;
+
+  struct PendingQueryResolve {
+    uint64_t submission = 0;
+    uint32_t query_index = UINT32_MAX;
+    uint32_t query_generation = 0;
+    uint32_t scale_area = 1;
+    bool uses_fsi_counter = false;
+    ReportHandle report_handle = kInvalidReportHandle;
+  };
+  uint32_t zpd_active_query_index_ = UINT32_MAX;
+  uint32_t zpd_active_query_generation_ = 0;
+  bool zpd_active_query_is_fsi_ = false;
+  bool zpd_fsi_counter_index_force_update_ = true;
+  std::deque<PendingQueryResolve> zpd_resolves_in_flight_;
+  // Fallback buffer for EDRAM descriptor binding 2.
+  VkBuffer zpd_fsi_counter_sink_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory zpd_fsi_counter_sink_buffer_memory_ = VK_NULL_HANDLE;
+  // Currently installed binding 2 buffer.
+  VkBuffer zpd_fsi_counter_descriptor_buffer_ = VK_NULL_HANDLE;
+  VkDeviceSize zpd_fsi_counter_descriptor_range_ = 0;
+
+  ui::vulkan::VulkanGPUCompletionTimeline completion_timeline_;
+  // Per-frame GPU synchronization diagnostics (worker thread only), reported
+  // alongside the log_gpu_frame_time_breakdown breakdown.
+  struct VkFrameSyncStats {
+    uint64_t frames = 0;
+    uint64_t awaits = 0;    // blocking waits for own submissions
+    uint64_t await_ns = 0;  // time inside those waits
+    uint64_t submissions = 0;
+    uint64_t resolves = 0;  // EDRAM resolves issued (churn magnitude)
+    uint64_t memexport_awaits = 0;
+    uint64_t readback_awaits = 0;
+    // Host-side latency from vkQueueSubmit to the fence being observed
+    // completed - includes GPU queue wait, render time and detection delay.
+    uint64_t sub_latency_ns = 0;
+    uint64_t sub_latency_max_ns = 0;
+    uint64_t sub_completions = 0;
+    // Awaits that actually blocked, and the sum over them of
+    // (current submission - awaited submission) to see how many submissions
+    // of headroom the throttle really has.
+    uint64_t blocking_awaits = 0;
+    uint64_t await_delta = 0;
+    // GPU-side wall time (top-of-pipe to bottom-of-pipe timestamps) of
+    // completed submissions, and the idle gaps between consecutive ones.
+    uint64_t gpu_exec_ns = 0;
+    uint64_t gpu_exec_max_ns = 0;
+    uint64_t gpu_gap_ns = 0;
+    uint64_t gpu_samples = 0;
+    // GPU time inside resolve emission regions (see the pairs in IssueCopy).
+    uint64_t resolve_gpu_ns = 0;
+    uint64_t resolve_gpu_max_ns = 0;
+    uint64_t resolve_gpu_samples = 0;
+    uint64_t resolve_ts_dropped = 0;
+    // Draw/pass structure counters.
+    uint64_t draws = 0;
+    uint64_t render_pass_begins = 0;
+    uint64_t primary_buffer_splits = 0;
+    uint64_t rb_uma_direct = 0;
+    uint64_t rb_uma_first_use = 0;
+    uint64_t last_report_ns = 0;
+  };
+  VkFrameSyncStats vk_frame_sync_stats_;
+
+ public:
+  VkFrameSyncStats& vk_frame_sync_stats() { return vk_frame_sync_stats_; }
+
+ private:
+  struct SubmitTimeRecord {
+    uint64_t submission;
+    uint64_t submit_ns;
+    // Slot in frame_timestamp_pool_, UINT32_MAX if timestamps unavailable.
+    uint32_t timestamp_slot;
+    // Resolve timestamp pairs recorded in this submission.
+    uint32_t resolve_slot_base;
+    uint32_t resolve_pair_count;
+    // Render-pass timestamp pairs recorded in this submission.
+    uint32_t pass_slot_base;
+    uint32_t pass_pair_count;
+  };
+  std::deque<SubmitTimeRecord> vk_submit_times_;
+  // GPU timestamps around each submission (2 per slot), copied in-buffer to
+  // the readback buffer so completion never requires host query calls (see
+  // the Turnip/kgsl note in the completion timeline about blocking fence
+  // status polls - vkGetQueryPoolResults would have the same hazard).
+  static constexpr uint32_t kFrameTimestampSlots = 32;
+  VkQueryPool frame_timestamp_pool_ = VK_NULL_HANDLE;
+  // Draws recorded into the currently open submission, for
+  // vulkan_mid_frame_submission_draws.
+  uint32_t draws_since_submission_ = 0;
+  VkBuffer frame_timestamp_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory frame_timestamp_buffer_memory_ = VK_NULL_HANDLE;
+  VkDeviceSize frame_timestamp_buffer_size_ = 0;
+  uint64_t* frame_timestamp_mapping_ = nullptr;
+  uint64_t frame_timestamp_prev_end_ = 0;
+  // GPU timestamps bracketing each resolve region, ring-buffered per
+  // submission like the per-submission pair above (same no-host-query rule).
+  static constexpr uint32_t kResolveTimestampPairsPerSubmission = 48;
+  static constexpr uint32_t kResolveTimestampRingSubmissions = 32;
+  VkQueryPool resolve_timestamp_pool_ = VK_NULL_HANDLE;
+  VkBuffer resolve_timestamp_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory resolve_timestamp_buffer_memory_ = VK_NULL_HANDLE;
+  VkDeviceSize resolve_timestamp_buffer_size_ = 0;
+  uint64_t* resolve_timestamp_mapping_ = nullptr;
+  uint64_t resolve_ts_submission_ = 0;
+  uint32_t resolve_ts_count_ = 0;
+  // GPU timestamps bracketing each render pass, bucketed CPU-side by
+  // framebuffer extent (bit 31 = ownership-transfer pass). Same ring/readback
+  // pattern; timestamps written OUTSIDE the pass (before begin / after end).
+  static constexpr uint32_t kPassTimestampPairsPerSubmission = 96;
+  static constexpr uint32_t kPassTimestampRingSubmissions = 32;
+  VkQueryPool pass_timestamp_pool_ = VK_NULL_HANDLE;
+  VkBuffer pass_timestamp_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory pass_timestamp_buffer_memory_ = VK_NULL_HANDLE;
+  VkDeviceSize pass_timestamp_buffer_size_ = 0;
+  uint64_t* pass_timestamp_mapping_ = nullptr;
+  uint64_t pass_ts_submission_ = 0;
+  uint32_t pass_ts_count_ = 0;
+  uint32_t pass_ts_open_pair_ = UINT32_MAX;
+  uint64_t pass_ts_open_submission_ = 0;
+  uint64_t pass_ts_dropped_ = 0;
+  std::array<uint32_t, size_t(kPassTimestampPairsPerSubmission) *
+                           kPassTimestampRingSubmissions>
+      pass_ts_keys_{};
+  std::array<uint32_t, size_t(kPassTimestampPairsPerSubmission) *
+                           kPassTimestampRingSubmissions>
+      pass_ts_draws_{};
+  uint32_t pass_open_draws_ = 0;
+  // Largest scissor corner seen among the draws of the currently open pass -
+  // the region actually touched, as opposed to the full EDRAM-derived
+  // framebuffer the render area is set to.
+  uint32_t pass_open_scissor_w_ = 0;
+  uint32_t pass_open_scissor_h_ = 0;
+  // Same for the viewport, which bounds the draw even when the guest leaves
+  // the scissor wide open.
+  uint32_t pass_open_viewport_w_ = 0;
+  uint32_t pass_open_viewport_h_ = 0;
+  std::array<uint32_t, size_t(kPassTimestampPairsPerSubmission) *
+                           kPassTimestampRingSubmissions>
+      pass_ts_scissor_{};
+  std::array<uint32_t, size_t(kPassTimestampPairsPerSubmission) *
+                           kPassTimestampRingSubmissions>
+      pass_ts_viewport_{};
+  struct PassBucketStat {
+    uint64_t ns = 0;
+    uint64_t passes = 0;
+    uint64_t draws = 0;
+    uint32_t max_scissor_w = 0;
+    uint32_t max_scissor_h = 0;
+    uint32_t max_viewport_w = 0;
+    uint32_t max_viewport_h = 0;
+  };
+  // Accumulated per bucket key since the last report.
+  std::map<uint32_t, PassBucketStat> pass_bucket_stats_;
+  void OpenPassTimestamp(uint32_t bucket_key);
+  void ClosePassTimestamp();
+  bool submission_open_ = false;
+  // In case vkQueueSubmit fails after something like a successful
+  // vkQueueBindSparse, to wait correctly on the next attempt.
+  std::vector<VkSemaphore> current_submission_wait_semaphores_;
+  std::vector<VkPipelineStageFlags> current_submission_wait_stage_masks_;
+  std::deque<std::pair<uint64_t, VkSemaphore>>
+      submissions_in_flight_semaphores_;
+
+  static constexpr uint32_t kMaxFramesInFlight = 3;
+  bool frame_open_ = false;
+  // Guest frame index, since some transient resources can be reused across
+  // submissions. Values updated in the beginning of a frame.
+  uint64_t frame_current_ = 1;
+  uint64_t frame_completed_ = 0;
+  // Submission indices of frames that have already been submitted.
+  uint64_t closed_frame_submissions_[kMaxFramesInFlight] = {};
+
+  // <Submission where last used, resource>, sorted by the submission number.
+  std::deque<std::pair<uint64_t, VkDeviceMemory>> destroy_memory_;
+  std::deque<std::pair<uint64_t, VkBuffer>> destroy_buffers_;
+  std::deque<std::pair<uint64_t, VkImage>> destroy_images_;
+  std::deque<std::pair<uint64_t, VkImageView>> destroy_image_views_;
+  std::deque<std::pair<uint64_t, VkFramebuffer>> destroy_framebuffers_;
+
+  std::vector<CommandBuffer> command_buffers_writable_;
+  std::deque<std::pair<uint64_t, CommandBuffer>> command_buffers_submitted_;
+  DeferredCommandBuffer deferred_command_buffer_;
+  DeferredCommandBuffer deferred_setup_command_buffer_;
+
+  std::vector<VkSparseMemoryBind> sparse_memory_binds_;
+  std::vector<SparseBufferBind> sparse_buffer_binds_;
+  // SparseBufferBind converted to VkSparseBufferMemoryBindInfo to this buffer
+  // on submission (because pBinds should point to a place in std::vector, but
+  // it may be reallocated).
+  std::vector<VkSparseBufferMemoryBindInfo> sparse_buffer_bind_infos_temp_;
+  VkPipelineStageFlags sparse_bind_wait_stage_mask_ = 0;
+
+  // Temporary storage with reusable memory for creating descriptor set layouts.
+  std::vector<VkDescriptorSetLayoutBinding> descriptor_set_layout_bindings_;
+  // Temporary storage with reusable memory for writing image and sampler
+  // descriptors.
+  std::vector<VkDescriptorImageInfo> descriptor_write_image_info_;
+
+  std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> uniform_buffer_pool_;
+
+  // Descriptor set layouts used by different shaders.
+  VkDescriptorSetLayout descriptor_set_layout_empty_ = VK_NULL_HANDLE;
+  VkDescriptorSetLayout descriptor_set_layout_constants_ = VK_NULL_HANDLE;
+  std::array<VkDescriptorSetLayout,
+             size_t(SingleTransientDescriptorLayout::kCount)>
+      descriptor_set_layouts_single_transient_{};
+  VkDescriptorSetLayout descriptor_set_layout_shared_memory_and_edram_ =
+      VK_NULL_HANDLE;
+
+  // Guards the layout maps below - GetPipelineLayout is called both from the
+  // draw thread and from pipeline creation threads (for deferred translation).
+  std::mutex pipeline_layouts_mutex_;
+  // Descriptor set layouts are referenced by pipeline_layouts_.
+  std::unordered_map<TextureDescriptorSetLayoutKey, VkDescriptorSetLayout,
+                     TextureDescriptorSetLayoutKey::Hasher>
+      descriptor_set_layouts_textures_;
+  // Pipeline layouts are referenced by VulkanPipelineCache.
+  std::unordered_map<PipelineLayoutKey, PipelineLayout,
+                     PipelineLayoutKey::Hasher>
+      pipeline_layouts_;
+
+  // No specific reason for 32768, just the "too much" descriptor count from
+  // Direct3D 12 PIX warnings.
+  static constexpr uint32_t kLinkedTypeDescriptorPoolSetCount = 32768;
+  static const VkDescriptorPoolSize kDescriptorPoolSizeUniformBuffer;
+  static const VkDescriptorPoolSize kDescriptorPoolSizeStorageBuffer;
+  static const VkDescriptorPoolSize kDescriptorPoolSizeStorageImage;
+  static const VkDescriptorPoolSize kDescriptorPoolSizeTextures[2];
+  ui::vulkan::LinkedTypeDescriptorSetAllocator
+      transient_descriptor_allocator_uniform_buffer_;
+  ui::vulkan::LinkedTypeDescriptorSetAllocator
+      transient_descriptor_allocator_storage_buffer_;
+  ui::vulkan::LinkedTypeDescriptorSetAllocator
+      transient_descriptor_allocator_storage_image_;
+  std::deque<UsedSingleTransientDescriptor> single_transient_descriptors_used_;
+  std::array<std::vector<VkDescriptorSet>,
+             size_t(SingleTransientDescriptorLayout::kCount)>
+      single_transient_descriptors_free_;
+  // <Usage frame, set>.
+  std::deque<std::pair<uint64_t, VkDescriptorSet>>
+      constants_transient_descriptors_used_;
+  std::vector<VkDescriptorSet> constants_transient_descriptors_free_;
+
+  ui::vulkan::LinkedTypeDescriptorSetAllocator
+      transient_descriptor_allocator_textures_;
+  std::deque<UsedTextureTransientDescriptorSet>
+      texture_transient_descriptor_sets_used_;
+  std::unordered_map<TextureDescriptorSetLayoutKey,
+                     std::vector<VkDescriptorSet>,
+                     TextureDescriptorSetLayoutKey::Hasher>
+      texture_transient_descriptor_sets_free_;
+
+  std::unique_ptr<VulkanSharedMemory> shared_memory_;
+
+  std::unique_ptr<VulkanPrimitiveProcessor> primitive_processor_;
+
+  std::unique_ptr<VulkanRenderTargetCache> render_target_cache_;
+
+  std::unique_ptr<VulkanZPDQueryPool> zpd_host_query_pool_;
+
+  // Deferred query slot releases for discards that happen outside a render
+  // pass, where vkCmdEndQuery cannot be issued.  The slot is held until the
+  // submission containing the stale BeginQuery completes on the GPU.
+  struct DeferredQueryRelease {
+    uint64_t submission;
+    uint32_t query_index;
+    uint32_t query_generation;
+  };
+  std::deque<DeferredQueryRelease> zpd_deferred_releases_;
+
+  std::unique_ptr<VulkanPipelineCache> pipeline_cache_;
+
+  std::unique_ptr<VulkanTextureCache> texture_cache_;
+
+  VkDescriptorPool shared_memory_and_edram_descriptor_pool_ = VK_NULL_HANDLE;
+  VkDescriptorSet shared_memory_and_edram_descriptor_set_;
+  // Second set identical to the one above except binding 0 points at the
+  // host-imported shared-memory buffer (aliasing guest RAM). Bound instead of
+  // the device set for memexport-touching draws so their GPU-written geometry
+  // stays coherent with the CPU. VK_NULL_HANDLE when the host buffer is
+  // unavailable - routing is then disabled and every draw uses the device set.
+  VkDescriptorSet shared_memory_host_and_edram_descriptor_set_ = VK_NULL_HANDLE;
+  // Two-buffer memexport page tracking (data + methods), shared with the D3D12
+  // backend as a class-body fragment so each backend gets its own non-virtual,
+  // inlinable copy. Requires <array> and SharedMemory, both included above.
+#include "../command_processor_memexport.inc"
+
+  // Bytes 0x0...0x3FF - 256-entry gamma ramp table with B10G10R10X2 data (read
+  // as R10G10B10X2 with swizzle).
+  // Bytes 0x400...0x9FF - 128-entry PWL R16G16 gamma ramp (R - base, G - delta,
+  // low 6 bits of each are zero, 3 elements per entry).
+  // kMaxFramesInFlight pairs of gamma ramps if in host-visible memory and
+  // uploaded directly, one otherwise.
+  VkDeviceMemory gamma_ramp_buffer_memory_ = VK_NULL_HANDLE;
+  VkBuffer gamma_ramp_buffer_ = VK_NULL_HANDLE;
+  // kMaxFramesInFlight pairs, only when the gamma ramp buffer is not
+  // host-visible.
+  VkDeviceMemory gamma_ramp_upload_buffer_memory_ = VK_NULL_HANDLE;
+  VkBuffer gamma_ramp_upload_buffer_ = VK_NULL_HANDLE;
+  VkDeviceSize gamma_ramp_upload_memory_size_;
+  uint32_t gamma_ramp_upload_memory_type_;
+  // Mapping of either gamma_ramp_buffer_memory_ (if it's host-visible) or
+  // gamma_ramp_upload_buffer_memory_ (otherwise).
+  void* gamma_ramp_upload_mapping_;
+  std::array<VkBufferView, 2 * kMaxFramesInFlight> gamma_ramp_buffer_views_{};
+  // UINT32_MAX if outdated.
+  uint32_t gamma_ramp_256_entry_table_current_frame_ = UINT32_MAX;
+  uint32_t gamma_ramp_pwl_current_frame_ = UINT32_MAX;
+
+  VkDescriptorSetLayout swap_descriptor_set_layout_sampled_image_ =
+      VK_NULL_HANDLE;
+  VkDescriptorSetLayout swap_descriptor_set_layout_uniform_texel_buffer_ =
+      VK_NULL_HANDLE;
+  // Storage image descriptor set layout for compute shader destination.
+  VkDescriptorSetLayout swap_descriptor_set_layout_storage_image_ =
+      VK_NULL_HANDLE;
+
+  // Descriptor pool for allocating descriptors needed for presentation, such as
+  // the destination images and the gamma ramps.
+  VkDescriptorPool swap_descriptor_pool_ = VK_NULL_HANDLE;
+  // Interleaved 256-entry table and PWL texel buffer descriptors.
+  // kMaxFramesInFlight pairs of gamma ramps if in host-visible memory and
+  // uploaded directly, one otherwise.
+  std::array<VkDescriptorSet, 2 * kMaxFramesInFlight>
+      swap_descriptors_gamma_ramp_;
+  // Sampled images for source.
+  std::array<VkDescriptorSet, kMaxFramesInFlight> swap_descriptors_source_;
+  // Storage images for destination.
+  std::array<VkDescriptorSet, kMaxFramesInFlight> swap_descriptors_dest_;
+
+  // Gamma ramp application compute pipeline constants.
+  struct ApplyGammaConstants {
+    uint32_t size[2];
+  };
+  VkPipelineLayout swap_apply_gamma_pipeline_layout_ = VK_NULL_HANDLE;
+  VkPipeline swap_apply_gamma_256_entry_table_pipeline_ = VK_NULL_HANDLE;
+  VkPipeline swap_apply_gamma_pwl_pipeline_ = VK_NULL_HANDLE;
+  // Gamma pipelines that also compute FXAA luma in the alpha channel.
+  VkPipeline swap_apply_gamma_256_entry_table_fxaa_luma_pipeline_ =
+      VK_NULL_HANDLE;
+  VkPipeline swap_apply_gamma_pwl_fxaa_luma_pipeline_ = VK_NULL_HANDLE;
+
+  // FXAA post-processing.
+  struct FxaaConstants {
+    uint32_t size[2];
+    float size_inv[2];
+  };
+  // Descriptor set layout for FXAA source (combined image sampler).
+  VkDescriptorSetLayout fxaa_source_descriptor_set_layout_ = VK_NULL_HANDLE;
+  VkPipelineLayout fxaa_pipeline_layout_ = VK_NULL_HANDLE;
+  VkPipeline fxaa_pipeline_ = VK_NULL_HANDLE;
+  VkPipeline fxaa_extreme_pipeline_ = VK_NULL_HANDLE;
+  VkSampler fxaa_sampler_ = VK_NULL_HANDLE;
+
+  // Resolve downscale compute shader for scaled resolution readback.
+  // Downscales scaled resolve buffer data back to 1x resolution on the GPU,
+  // avoiding expensive CPU-side downscaling and reducing transfer bandwidth.
+  VkDescriptorSetLayout resolve_downscale_descriptor_set_layout_ =
+      VK_NULL_HANDLE;
+  VkPipelineLayout resolve_downscale_pipeline_layout_ = VK_NULL_HANDLE;
+  VkPipeline resolve_downscale_pipeline_ = VK_NULL_HANDLE;
+  // Descriptor pool chain for resolve downscale shader (2 storage buffers per
+  // set). Uses pool chain to avoid mid-frame GPU stalls on pool exhaustion.
+  std::unique_ptr<ui::vulkan::VulkanDescriptorPoolChain>
+      resolve_downscale_descriptor_pool_chain_;
+  // Intermediate buffer for downscaled output (device local, for compute).
+  VkBuffer resolve_downscale_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory resolve_downscale_buffer_memory_ = VK_NULL_HANDLE;
+  uint32_t resolve_downscale_buffer_size_ = 0;
+
+  // FXAA source texture - R16G16B16A16_SFLOAT for luma in alpha.
+  static constexpr VkFormat kFxaaSourceFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+  VkDeviceMemory fxaa_source_memory_ = VK_NULL_HANDLE;
+  VkImage fxaa_source_image_ = VK_NULL_HANDLE;
+  VkImageView fxaa_source_image_view_ = VK_NULL_HANDLE;
+  uint32_t fxaa_source_width_ = 0;
+  uint32_t fxaa_source_height_ = 0;
+  uint64_t fxaa_source_last_submission_ = 0;
+  // Descriptor sets for FXAA - source as combined image sampler (for FXAA
+  // read).
+  std::array<VkDescriptorSet, kMaxFramesInFlight> fxaa_source_descriptors_;
+  // Descriptor sets for FXAA - source as storage image (for gamma+luma write).
+  std::array<VkDescriptorSet, kMaxFramesInFlight>
+      fxaa_source_storage_descriptors_;
+
+  // Pending pipeline barriers.
+  std::vector<VkBufferMemoryBarrier> pending_barriers_buffer_memory_barriers_;
+  std::vector<VkImageMemoryBarrier> pending_barriers_image_memory_barriers_;
+  struct PendingBarrier {
+    VkPipelineStageFlags src_stage_mask = 0;
+    VkPipelineStageFlags dst_stage_mask = 0;
+    size_t buffer_memory_barriers_offset = 0;
+    size_t image_memory_barriers_offset = 0;
+  };
+  std::vector<PendingBarrier> pending_barriers_;
+  PendingBarrier current_pending_barrier_;
+
+  // GPU-local scratch buffer.
+  static constexpr VkDeviceSize kScratchBufferSizeIncrement = 16 * 1024 * 1024;
+  VkDeviceMemory scratch_buffer_memory_ = VK_NULL_HANDLE;
+  VkBuffer scratch_buffer_ = VK_NULL_HANDLE;
+  VkDeviceSize scratch_buffer_size_ = 0;
+  VkPipelineStageFlags scratch_buffer_last_stage_mask_ = 0;
+  VkAccessFlags scratch_buffer_last_access_mask_ = 0;
+  uint64_t scratch_buffer_last_usage_submission_ = 0;
+  bool scratch_buffer_used_ = false;
+
+  // The current dynamic state of the graphics pipeline bind point. Note that
+  // binding any pipeline to the bind point with static state (even if it's
+  // unused, like depth bias being disabled, but the values themselves still not
+  // declared as dynamic in the pipeline) invalidates such dynamic state.
+  VkViewport dynamic_viewport_;
+  VkRect2D dynamic_scissor_;
+  // Dynamic fixed-function depth bias, blend constants, stencil state are
+  // applicable only to the render target implementations where they are
+  // actually involved.
+  float dynamic_depth_bias_constant_factor_;
+  float dynamic_depth_bias_slope_factor_;
+  float dynamic_blend_constants_[4];
+  // The stencil values are pre-initialized (to D3D11_DEFAULT_STENCIL_*, and the
+  // initial values for front and back are the same for portability subset
+  // safety) because they're updated conditionally to avoid changing the back
+  // face values when stencil is disabled and the primitive type is changed
+  // between polygonal and non-polygonal.
+  uint32_t dynamic_stencil_compare_mask_front_ = UINT8_MAX;
+  uint32_t dynamic_stencil_compare_mask_back_ = UINT8_MAX;
+  uint32_t dynamic_stencil_write_mask_front_ = UINT8_MAX;
+  uint32_t dynamic_stencil_write_mask_back_ = UINT8_MAX;
+  uint32_t dynamic_stencil_reference_front_ = 0;
+  uint32_t dynamic_stencil_reference_back_ = 0;
+  bool dynamic_viewport_update_needed_;
+  bool dynamic_scissor_update_needed_;
+  bool dynamic_depth_bias_update_needed_;
+  bool dynamic_blend_constants_update_needed_;
+  bool dynamic_stencil_compare_mask_front_update_needed_;
+  bool dynamic_stencil_compare_mask_back_update_needed_;
+  bool dynamic_stencil_write_mask_front_update_needed_;
+  bool dynamic_stencil_write_mask_back_update_needed_;
+  bool dynamic_stencil_reference_front_update_needed_;
+  bool dynamic_stencil_reference_back_update_needed_;
+
+  // Extended dynamic state (VK_EXT_extended_dynamic_state / state2 / state3).
+  // Cached last-emitted values + dirty flags, mirroring the existing dynamic
+  // state idiom. Initialized to invalid sentinels so the first draw of each
+  // submission always emits. Only emitted when the matching capability bit in
+  // the pipeline cache is set.
+  VkPrimitiveTopology dynamic_primitive_topology_ = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
+  VkBool32 dynamic_primitive_restart_enable_ = VK_FALSE;
+  VkCullModeFlags dynamic_cull_mode_ = VK_CULL_MODE_FLAG_BITS_MAX_ENUM;
+  VkFrontFace dynamic_front_face_ = VK_FRONT_FACE_MAX_ENUM;
+  VkBool32 dynamic_depth_test_enable_ = VK_FALSE;
+  VkBool32 dynamic_depth_write_enable_ = VK_FALSE;
+  VkCompareOp dynamic_depth_compare_op_ = VK_COMPARE_OP_MAX_ENUM;
+  VkBool32 dynamic_stencil_test_enable_ = VK_FALSE;
+  VkStencilOpState dynamic_stencil_op_front_ = {};
+  VkStencilOpState dynamic_stencil_op_back_ = {};
+  VkBool32 dynamic_depth_clamp_enable_ = VK_FALSE;
+  VkPolygonMode dynamic_polygon_mode_ = VK_POLYGON_MODE_MAX_ENUM;
+  VkBool32 dynamic_color_blend_enable_[xenos::kMaxColorRenderTargets] = {};
+  VkColorBlendEquationEXT
+      dynamic_color_blend_equation_[xenos::kMaxColorRenderTargets] = {};
+  VkColorComponentFlags
+      dynamic_color_write_mask_[xenos::kMaxColorRenderTargets] = {};
+  bool dynamic_primitive_topology_update_needed_;
+  bool dynamic_primitive_restart_enable_update_needed_;
+  bool dynamic_cull_mode_update_needed_;
+  bool dynamic_front_face_update_needed_;
+  bool dynamic_depth_test_enable_update_needed_;
+  bool dynamic_depth_write_enable_update_needed_;
+  bool dynamic_depth_compare_op_update_needed_;
+  bool dynamic_stencil_test_enable_update_needed_;
+  bool dynamic_stencil_op_front_update_needed_;
+  bool dynamic_stencil_op_back_update_needed_;
+  bool dynamic_depth_clamp_enable_update_needed_;
+  bool dynamic_polygon_mode_update_needed_;
+  bool dynamic_color_blend_enable_update_needed_;
+  bool dynamic_color_blend_equation_update_needed_;
+  bool dynamic_color_write_mask_update_needed_;
+
+  // Currently used samplers.
+  std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>>
+      current_samplers_vertex_;
+  std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>>
+      current_samplers_pixel_;
+  // Cross-draw sampler cache state (cvar vulkan_cache_sampler_parameters).
+  // A stage's current_samplers_* contents are reusable for the next draw if:
+  // the same shader provides the binding list (pointers are stable - shaders
+  // are only destroyed at pipeline cache shutdown), no sampler was destroyed
+  // since (destroy generation), and per fetch slot, the fetch constant wasn't
+  // written since the parameters were derived (per-stage dirty masks, bit set
+  // = up to date, maintained in WriteRegister and committed after a draw's
+  // sampler pass). The per-stage submission stamp tracks when UseSampler was
+  // last called for every entry - it must run at least once per submission so
+  // the texture cache's LRU eviction (which only frees samplers whose last
+  // usage submission has fully completed) can never destroy a cached handle.
+  uint32_t current_samplers_fetch_up_to_date_vertex_ = 0;
+  uint32_t current_samplers_fetch_up_to_date_pixel_ = 0;
+  const VulkanShader* current_samplers_shader_vertex_ = nullptr;
+  const VulkanShader* current_samplers_shader_pixel_ = nullptr;
+  uint64_t current_samplers_submission_vertex_ = 0;
+  uint64_t current_samplers_submission_pixel_ = 0;
+  uint64_t current_samplers_destroy_generation_ = ~uint64_t(0);
+
+  // Cache render pass currently started in the command buffer with the
+  // framebuffer. For dynamic rendering, current_render_pass_ is VK_NULL_HANDLE
+  // but in_render_pass_ is true.
+  VkRenderPass current_render_pass_;
+  const VulkanRenderTargetCache::Framebuffer* current_framebuffer_;
+  // True when inside a render pass or dynamic rendering block.
+  bool in_render_pass_ = false;
+
+  // Currently bound graphics pipeline, either from the pipeline cache (with
+  // potentially deferred creation - current_external_graphics_pipeline_ is
+  // VK_NULL_HANDLE in this case) or a non-Xenos one
+  // (current_guest_graphics_pipeline_ is nullptr in this case).
+  // current_guest_graphics_pipeline_ is a STABLE pointer to the pipeline
+  // cache's atomic VkPipeline slot, not a handle value - with asynchronous
+  // creation the handle may still be VK_NULL_HANDLE at record time, so the
+  // bind de-dup compares slot pointers and the deferred command buffer
+  // resolves the handle at replay.
+  const std::atomic<VkPipeline>* current_guest_graphics_pipeline_;
+  // The handle the last recorded deferred bind captured; the first draw after
+  // the slot fills or swaps re-records with the new handle.
+  VkPipeline current_guest_graphics_pipeline_handle_ = VK_NULL_HANDLE;
+  VkPipeline current_external_graphics_pipeline_;
+  VkPipeline current_external_compute_pipeline_;
+
+  // Pipeline layout of the current guest graphics pipeline.
+  const PipelineLayout* current_guest_graphics_pipeline_layout_;
+  VkDescriptorBufferInfo current_constant_buffer_infos_
+      [SpirvShaderTranslator::kConstantBufferCount];
+  // Whether up-to-date data has been written to constant (uniform) buffers, and
+  // the buffer infos in current_constant_buffer_infos_ point to them.
+  uint32_t current_constant_buffers_up_to_date_;
+  // Dynamic constant buffers: when true (gated at SetupContext on the device reporting
+  // maxDescriptorSetUniformBuffersDynamic >= kConstantBufferCount and the
+  // vulkan_dynamic_constant_buffers cvar), the kDescriptorSetConstants set uses
+  // VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC: the descriptor base offset is 0
+  // and the per-draw slice offset is supplied as a dynamic offset at bind time,
+  // so the transient set is re-allocated and re-written ONLY when a binding's
+  // backing VkBuffer changes (uniform_buffer_pool_ page rollover). Held constant
+  // for the device lifetime; all of the layout binding type, the
+  // VkWriteDescriptorSet type and the bind's pDynamicOffsets switch on it
+  // together (a partial switch is a VUID violation).
+  bool use_dynamic_constants_ = false;
+  // Value-cache for the constants descriptor set (one shared set, 5 bindings).
+  // Mirrors the sentinel-free validity discipline of the texture hash caches
+  // above: constants_descriptor_set_buffers_[i] records the VkBuffer handle last
+  // WRITTEN into binding i of the cached set in
+  // current_graphics_descriptor_sets_[kDescriptorSetConstants]. When all five
+  // still match the current_constant_buffer_infos_[i].buffer handles AND the
+  // recorded ranges still match (no page rollover and no constant-count change),
+  // the per-draw vkUpdateDescriptorSets + set allocation are skipped and only
+  // fresh pDynamicOffsets are bound. constants_descriptor_set_valid_ is reset to
+  // false at every point where the cached transient set can become invalid (new
+  // frame / transient-pool reset / used->free reclaim) so a stale handle can
+  // never let the GPU read recycled or freed descriptor memory. Only meaningful
+  // when use_dynamic_constants_ is true.
+  //
+  // The range is tracked alongside the buffer because the dynamic path only
+  // re-binds pDynamicOffsets per draw; the descriptor's range is baked at write
+  // time. The float-constant buffers' sizes vary with the shader's float_count
+  // (see UpdateBindings), and the upload pool returns the SAME page (only a new
+  // offset) when the new size still fits, so a buffer-only rollover check would
+  // keep a stale, too-small range and the shader's higher-index float constants
+  // would read as clamped/zero -> wrong transforms -> flicker, with no VUID
+  // (dynamicOffset + stale_range still fits the buffer). Comparing the range
+  // forces the cheap re-write on a constant-count change (a shader switch, far
+  // rarer than per-draw constant value changes).
+  VkBuffer constants_descriptor_set_buffers_
+      [SpirvShaderTranslator::kConstantBufferCount] = {};
+  VkDeviceSize constants_descriptor_set_ranges_
+      [SpirvShaderTranslator::kConstantBufferCount] = {};
+  bool constants_descriptor_set_valid_ = false;
+  VkDescriptorSet current_graphics_descriptor_sets_
+      [SpirvShaderTranslator::kDescriptorSetCount];
+  // Whether descriptor sets in current_graphics_descriptor_sets_ point to
+  // up-to-date data.
+  uint32_t current_graphics_descriptor_set_values_up_to_date_;
+  // Value-cache for the texture/sampler descriptor sets (vertex and pixel,
+  // tracked independently). 64-bit FNV-1a content hash over the packed layout
+  // key + the resolved VkImageView and VkSampler handles of the last
+  // successfully-written transient set for the stage. The cached set lives in
+  // current_graphics_descriptor_sets_[kDescriptorSetTexturesVertex/Pixel]; the
+  // hash gates whether we may SKIP clearing that stage's
+  // current_graphics_descriptor_set_values_up_to_date_ bit (i.e. reuse the
+  // already-written, still-valid transient set without a vkUpdateDescriptorSets
+  // + re-bind). The *_valid_ flags are sentinel-free validity: they are reset
+  // to false at every point where the cached transient set can become invalid
+  // (new frame / transient-pool reset / pipeline-layout change) so a stale hash
+  // can never let the GPU sample recycled or freed descriptor memory.
+  uint64_t current_texture_descriptor_set_hash_vertex_ = 0;
+  uint64_t current_texture_descriptor_set_hash_pixel_ = 0;
+  bool current_texture_descriptor_set_hash_valid_vertex_ = false;
+  bool current_texture_descriptor_set_hash_valid_pixel_ = false;
+  // Scratch buffer for compute_texture_set_hash, reused across draws (cleared
+  // each call, capacity persists) to gather the reuse-input words for a single
+  // XXH3 call without a per-draw allocation. GPU-command-thread-only.
+  std::vector<uint64_t> texture_set_hash_scratch_;
+  // Whether the descriptor sets currently bound to the command buffer - only
+  // low bits for the descriptor set layouts that remained the same are kept
+  // when changing the pipeline layout. May be out of sync with
+  // current_graphics_descriptor_set_values_up_to_date_, but should be ensured
+  // to be a subset of it at some point when it becomes important; bits for
+  // non-existent descriptor set layouts may also be set, but need to be ignored
+  // when they start to matter.
+  uint32_t current_graphics_descriptor_sets_bound_up_to_date_;
+  static_assert(
+      SpirvShaderTranslator::kDescriptorSetCount <=
+          sizeof(current_graphics_descriptor_set_values_up_to_date_) * CHAR_BIT,
+      "Bit fields storing descriptor set validity must be large enough");
+  static_assert(
+      SpirvShaderTranslator::kDescriptorSetCount <=
+          sizeof(current_graphics_descriptor_sets_bound_up_to_date_) * CHAR_BIT,
+      "Bit fields storing descriptor set validity must be large enough");
+  // For reusing the texture/sampler descriptor sets across draws while their
+  // contents stay valid - the shaders and the samplers the currently valid
+  // texture descriptor sets were written for (texture image view changes are
+  // tracked separately via VulkanTextureCache::texture_bindings_changed).
+  const VulkanShader* current_textures_vertex_shader_ = nullptr;
+  const VulkanShader* current_textures_pixel_shader_ = nullptr;
+  std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>>
+      current_written_samplers_vertex_;
+  std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>>
+      current_written_samplers_pixel_;
+
+  // Float constant usage masks of the last draw call.
+  uint64_t current_float_constant_map_vertex_[4];
+  uint64_t current_float_constant_map_pixel_[4];
+  // True if the vertex float constant buffer holds the full unpacked 256 float
+  // constants for the ucode interpreter rather than a shader's packed subset.
+  // Used to invalidate the binding when switching interpreter <-> normal.
+  bool float_constants_vertex_are_full_ = false;
+
+  // System shader constants, including user clip planes and tessellation
+  // constants.
+  SpirvShaderTranslator::SystemConstants system_constants_;
+
+  // Temporary storage for memexport stream constants used in the draw.
+  std::vector<draw_util::MemExportRange> memexport_ranges_;
+
+  // Backend-agnostic resolve-to-guest-RAM copy decisions and read-watch
+  // consumption tracking, shared with the D3D12 backend.
+#include "../command_processor_resolve_readwatch.inc"
+  // readback_resolve=uma: last submission that resolved each destination key,
+  // so the direct host read only happens once that submission has retired.
+  std::unordered_map<uint64_t, uint64_t> uma_readback_last_write_;
+  // Per-backend trampoline from the memory read callback into the shared
+  // MarkResolvePagesRead.
+  static void ResolveReadCallbackThunk(void* context, uint32_t physical_address,
+                                       uint32_t length);
+
+  // Debug marker support for RenderDoc/debug tools.
+  bool debug_markers_enabled_ = false;
+  void UpdateDebugMarkersEnabled();
+};
+
+}  // namespace vulkan
+}  // namespace gpu
+}  // namespace xe
+
+#endif  // XENIA_GPU_VULKAN_VULKAN_COMMAND_PROCESSOR_H_

@@ -1,0 +1,432 @@
+/////////////////////////////////////////////////////////////////////////////
+// Name:        src/common/stattextcmn.cpp
+// Purpose:     common (to all ports) wxStaticText functions
+// Author:      Vadim Zeitlin, Francesco Montorsi
+// Created:     2007-01-07 (extracted from dlgcmn.cpp)
+// Copyright:   (c) 1999-2006 Vadim Zeitlin
+//              (c) 2007 Francesco Montorsi
+// Licence:     wxWindows licence
+/////////////////////////////////////////////////////////////////////////////
+
+// ============================================================================
+// declarations
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// headers
+// ----------------------------------------------------------------------------
+
+// For compilers that support precompilation, includes "wx.h".
+#include "wx/wxprec.h"
+
+
+#if wxUSE_STATTEXT
+
+#ifndef WX_PRECOMP
+    #include "wx/stattext.h"
+    #include "wx/button.h"
+    #include "wx/dcclient.h"
+    #include "wx/intl.h"
+    #include "wx/log.h"
+    #include "wx/settings.h"
+    #include "wx/sizer.h"
+    #include "wx/containr.h"
+#endif
+
+#include "wx/textwrapper.h"
+
+#include "wx/private/markupparser.h"
+
+#include <algorithm>
+
+extern WXDLLEXPORT_DATA(const char) wxStaticTextNameStr[] = "staticText";
+
+// ----------------------------------------------------------------------------
+// XTI
+// ----------------------------------------------------------------------------
+
+wxDEFINE_FLAGS( wxStaticTextStyle )
+wxBEGIN_FLAGS( wxStaticTextStyle )
+// new style border flags, we put them first to
+// use them for streaming out
+wxFLAGS_MEMBER(wxBORDER_SIMPLE)
+wxFLAGS_MEMBER(wxBORDER_SUNKEN)
+wxFLAGS_MEMBER(wxBORDER_DOUBLE)
+wxFLAGS_MEMBER(wxBORDER_RAISED)
+wxFLAGS_MEMBER(wxBORDER_STATIC)
+wxFLAGS_MEMBER(wxBORDER_NONE)
+
+// old style border flags
+wxFLAGS_MEMBER(wxSIMPLE_BORDER)
+wxFLAGS_MEMBER(wxSUNKEN_BORDER)
+wxFLAGS_MEMBER(wxDOUBLE_BORDER)
+wxFLAGS_MEMBER(wxRAISED_BORDER)
+wxFLAGS_MEMBER(wxSTATIC_BORDER)
+wxFLAGS_MEMBER(wxBORDER)
+
+// standard window styles
+wxFLAGS_MEMBER(wxTAB_TRAVERSAL)
+wxFLAGS_MEMBER(wxCLIP_CHILDREN)
+wxFLAGS_MEMBER(wxWANTS_CHARS)
+wxFLAGS_MEMBER(wxFULL_REPAINT_ON_RESIZE)
+wxFLAGS_MEMBER(wxALWAYS_SHOW_SB )
+wxFLAGS_MEMBER(wxVSCROLL)
+wxFLAGS_MEMBER(wxHSCROLL)
+
+wxFLAGS_MEMBER(wxST_NO_AUTORESIZE)
+wxFLAGS_MEMBER(wxALIGN_LEFT)
+wxFLAGS_MEMBER(wxALIGN_RIGHT)
+wxFLAGS_MEMBER(wxALIGN_CENTRE)
+wxEND_FLAGS( wxStaticTextStyle )
+
+wxIMPLEMENT_DYNAMIC_CLASS_XTI(wxStaticText, wxControl, "wx/stattext.h");
+
+wxBEGIN_PROPERTIES_TABLE(wxStaticText)
+wxPROPERTY( Label,wxString, SetLabel, GetLabel, wxString(), 0 /*flags*/, \
+           wxT("Helpstring"), wxT("group"))
+wxPROPERTY_FLAGS( WindowStyle, wxStaticTextStyle, long, SetWindowStyleFlag, \
+                 GetWindowStyleFlag, wxEMPTY_PARAMETER_VALUE, 0 /*flags*/, \
+                 wxT("Helpstring"), wxT("group")) // style
+wxEND_PROPERTIES_TABLE()
+
+wxEMPTY_HANDLERS_TABLE(wxStaticText)
+
+wxCONSTRUCTOR_6( wxStaticText, wxWindow*, Parent, wxWindowID, Id, \
+                wxString, Label, wxPoint, Position, wxSize, Size, long, WindowStyle )
+
+
+// ----------------------------------------------------------------------------
+// wxTextWrapper
+// ----------------------------------------------------------------------------
+
+namespace
+{
+
+bool IsBreakableWhiteSpace(wxUniChar ch)
+{
+    // We don't take "\r" into account here as it's not supposed to be present
+    // in the labels and "\n" is not present because Wrap() splits text on it.
+    switch ( ch.GetValue() )
+    {
+        case ' ':
+        case '\t':
+        case 0x2000: // en quad
+        case 0x2001: // em quad
+        case 0x2002: // en space
+        case 0x2003: // em space
+        case 0x2004: // three-per-em space
+        case 0x2005: // four-per-em space
+        case 0x2006: // six-per-em space
+        case 0x2008: // punctuation space
+        case 0x2009: // thin space
+        case 0x200A: // hair space
+        case 0x200B: // zero width space
+            return true;
+    }
+
+    return false;
+}
+
+} // anonymous namespace
+
+void wxTextWrapper::Wrap(wxWindow *win, const wxString& text, int widthMax)
+{
+    const wxInfoDC dc(win);
+
+    bool hadFirst = false;
+    for ( auto line : wxSplit(text, '\n', '\0') )
+    {
+        // Call OnNewLine() for every new line in any case.
+        if ( !hadFirst )
+            hadFirst = true;
+        else
+            OnNewLine();
+
+        // Is this a special case when wrapping is disabled?
+        if ( widthMax < 0 )
+        {
+            DoOutputLine(line);
+            continue;
+        }
+
+        for ( bool newLine = false; !line.empty(); newLine = true )
+        {
+            if ( newLine )
+                OnNewLine();
+
+            wxArrayInt widths;
+            dc.GetPartialTextExtents(line, widths);
+
+            const size_t posEnd = std::lower_bound
+                (
+                   widths.begin(),
+                   widths.end(),
+                   widthMax,
+                   [](int w1, int w2) { return w1 <= w2; }
+                ) - widths.begin();
+
+            // Does the entire remaining line fit?
+            if ( posEnd == line.length() )
+            {
+                DoOutputLine(line);
+                break;
+            }
+
+            // If the overflowing character is a space, we can break right here.
+            if ( IsBreakableWhiteSpace(line[posEnd]) )
+            {
+                DoOutputLine(line.substr(0, posEnd));
+                line = line.substr(posEnd + 1);
+                continue;
+            }
+
+            // Find the last word to chop off.
+            //
+            // "Word" is defined here as just a sequence of non-space chars.
+            //
+            // TODO: Implement real Unicode word break algorithm.
+            size_t posSpace = posEnd;
+            for ( ;; posSpace-- )
+            {
+                if ( posSpace == 0 )
+                {
+                    // No spaces, so can't wrap, output until the end of the word.
+                    posSpace = posEnd;
+                    for ( ;; )
+                    {
+                        if ( ++posSpace == line.length() )
+                        {
+                            // No more spaces at all, output the rest of the line.
+                            DoOutputLine(line);
+                            return;
+                        }
+
+                        if ( IsBreakableWhiteSpace(line[posSpace]) )
+                            break;
+                    }
+
+                    break;
+                }
+
+                if ( IsBreakableWhiteSpace(line[posSpace]) )
+                    break;
+            }
+
+            // Output the part that fits.
+            DoOutputLine(line.substr(0, posSpace));
+
+            // And redo the layout with the rest.
+            line = line.substr(posSpace + 1);
+        }
+    }
+}
+
+
+// ----------------------------------------------------------------------------
+// wxLabelWrapper: helper class for wxStaticTextBase::Wrap()
+// ----------------------------------------------------------------------------
+
+class wxLabelWrapper : public wxTextWrapper
+{
+public:
+    void WrapLabel(wxWindow *text, int widthMax)
+    {
+        m_text.clear();
+        Wrap(text, text->GetLabel(), widthMax);
+        text->SetLabel(m_text);
+    }
+
+protected:
+    virtual void OnOutputLine(const wxString& line) override
+    {
+        m_text += line;
+    }
+
+    virtual void OnNewLine() override
+    {
+        m_text += wxT('\n');
+    }
+
+private:
+    wxString m_text;
+};
+
+
+// ----------------------------------------------------------------------------
+// wxStaticTextBase
+// ----------------------------------------------------------------------------
+
+void wxStaticTextBase::Wrap(int width)
+{
+    if (width == m_currentWrap)
+        return;
+
+    m_currentWrap = width;
+
+    // Allow for repeated calls to Wrap() with different values by storing the
+    // original label, before wrapping it. We also need to preserve the value
+    // of the unwrapped label if it's already set because the calls to
+    // SetLabel() (including from inside wxLabelWrapper) reset it.
+    auto const unwrappedLabel = m_unwrappedLabel.empty()
+                                    ? GetLabel()
+                                    : m_unwrappedLabel;
+    if ( !m_unwrappedLabel.empty() )
+    {
+        SetLabel( m_unwrappedLabel );
+    }
+    wxLabelWrapper wrapper;
+    wrapper.WrapLabel(this, width);
+    InvalidateBestSize();
+
+    m_unwrappedLabel = unwrappedLabel;
+}
+
+wxSize
+wxStaticTextBase::GetMinSizeFromKnownDirection(int direction,
+                                               int size,
+                                               int WXUNUSED(availableOtherDir))
+{
+    if ( !HasFlag(wxST_WRAP) || direction != wxHORIZONTAL )
+        return wxDefaultSize;
+
+    // Wrap at the given width to compute the required size.
+    const int style = GetWindowStyleFlag();
+    if ( !(style & wxST_NO_AUTORESIZE) )
+        SetWindowStyleFlag( style | wxST_NO_AUTORESIZE );
+
+    Wrap( size );
+
+    if ( !(style & wxST_NO_AUTORESIZE) )
+        SetWindowStyleFlag( style );
+
+    // Now compute the best size for the wrapped label.
+    int numLines = 0;
+    int maxLineWidth = 0;
+    for ( auto line : wxSplit(GetLabel(), '\n', '\0') )
+    {
+        const int w = GetTextExtent(line).x;
+        if ( w > maxLineWidth )
+            maxLineWidth = w;
+
+        ++numLines;
+    }
+
+    return wxSize( maxLineWidth, numLines*GetCharHeight() );
+}
+
+void wxStaticTextBase::SetWindowStyleFlag(long style)
+{
+    // Check if wxST_WRAP is being cleared.
+    if ( HasFlag(wxST_WRAP) && !(style & wxST_WRAP) )
+    {
+        // And unwrap the label in this case.
+        if ( m_currentWrap )
+        {
+            SetLabel(m_unwrappedLabel);
+            m_unwrappedLabel.clear();
+            m_currentWrap = 0;
+        }
+    }
+
+    wxControl::SetWindowStyleFlag(style);
+}
+
+void wxStaticTextBase::AutoResizeIfNecessary()
+{
+    // This flag is specifically used to prevent the control from resizing even
+    // when its label changes.
+    if ( HasFlag(wxST_NO_AUTORESIZE) )
+        return;
+
+    // This method is only called if either the label or the font changed, i.e.
+    // if the label extent changed, so the best size is not the same either
+    // any more.
+    //
+    // Note that we don't invalidate it when wxST_NO_AUTORESIZE is on because
+    // this would result in the control being effectively resized during the
+    // next Layout() and this style is used expressly to prevent this from
+    // happening.
+    InvalidateBestSize();
+
+    SetSize(GetBestSize());
+}
+
+bool wxStaticTextBase::UpdateLabelOrig(const wxString& label)
+{
+    if ( label == m_labelOrig )
+        return false;
+
+    m_labelOrig = label;
+
+    // We need to clear the existing unwrapped label as it doesn't correspond
+    // to the new value of the actual label any longer.
+    m_unwrappedLabel.clear();
+
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// wxStaticTextBase - generic implementation for wxST_ELLIPSIZE_* support
+// ----------------------------------------------------------------------------
+
+void wxStaticTextBase::UpdateLabel()
+{
+    if (!IsEllipsized())
+        return;
+
+    const wxString& newlabel = GetEllipsizedLabel();
+
+    // we need to touch the "real" label (i.e. the text set inside the control,
+    // using port-specific functions) instead of the string returned by GetLabel().
+    //
+    // In fact, we must be careful not to touch the original label passed to
+    // SetLabel() otherwise GetLabel() will behave in a strange way to the user
+    // (e.g. returning a "Ver...ing" instead of "Very long string") !
+    if (newlabel == WXGetVisibleLabel())
+        return;
+    WXSetVisibleLabel(newlabel);
+}
+
+wxString wxStaticTextBase::GetEllipsizedLabel() const
+{
+    // this function should be used only by ports which do not support
+    // ellipsis in static texts: we first remove markup (which cannot
+    // be handled safely by Ellipsize()) and then ellipsize the result.
+
+    wxString ret(m_labelOrig);
+
+    if (IsEllipsized())
+        ret = Ellipsize(ret);
+
+    return ret;
+}
+
+wxString wxStaticTextBase::Ellipsize(const wxString& label) const
+{
+    wxSize sz(GetClientSize());
+    if (sz.GetWidth() < 2 || sz.GetHeight() < 2)
+    {
+        // the size of this window is not valid (yet)
+        return label;
+    }
+
+    wxInfoDC dc(const_cast<wxStaticTextBase*>(this));
+
+    wxEllipsizeMode mode;
+    if ( HasFlag(wxST_ELLIPSIZE_START) )
+        mode = wxELLIPSIZE_START;
+    else if ( HasFlag(wxST_ELLIPSIZE_MIDDLE) )
+        mode = wxELLIPSIZE_MIDDLE;
+    else if ( HasFlag(wxST_ELLIPSIZE_END) )
+        mode = wxELLIPSIZE_END;
+    else
+    {
+        wxFAIL_MSG( "should only be called if have one of wxST_ELLIPSIZE_XXX" );
+
+        return label;
+    }
+
+    return wxControl::Ellipsize(label, dc, mode, sz.GetWidth());
+}
+
+#endif // wxUSE_STATTEXT

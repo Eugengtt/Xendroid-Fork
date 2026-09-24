@@ -1,0 +1,43 @@
+/////////////////////////////////////////////////////////////////////////////
+// Name:        src/generic/colour.cpp
+// Purpose:     wxColourImpl class
+// Author:      Julian Smart
+// Created:     01/02/97
+// Copyright:   (c) Julian Smart
+// Licence:     wxWindows licence
+/////////////////////////////////////////////////////////////////////////////
+
+// For compilers that support precompilation, includes "wx.h".
+#include "wx/wxprec.h"
+
+
+#include "wx/colour.h"
+
+#ifndef WX_PRECOMP
+    #include "wx/gdicmn.h"
+#endif
+
+// Colour
+
+void wxColourImpl::InitRGBA(unsigned char r,
+                        unsigned char g,
+                        unsigned char b,
+                        unsigned char a)
+{
+    m_red = r;
+    m_green = g;
+    m_blue = b;
+    m_alpha = a;
+    m_isInit = true;
+}
+
+wxColourImpl& wxColourImpl::operator=(const wxColourImpl& col)
+{
+    m_red = col.m_red;
+    m_green = col.m_green;
+    m_blue = col.m_blue;
+    m_alpha = col.m_alpha;
+    m_isInit = col.m_isInit;
+    return *this;
+}
+

@@ -1,0 +1,8 @@
+{
+  "type": "module",
+  "devDependencies": {
+    "eslint": "latest",
+    "eslint-plugin-toml": "latest",
+    "@stylistic/eslint-plugin": "latest"
+  }
+}

@@ -1,0 +1,531 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include "xenia/apu/xma_decoder.h"
+
+#include "xenia/apu/xma_context.h"
+#include "xenia/apu/xma_context_fake.h"
+#include "xenia/apu/xma_context_master.h"
+#include "xenia/apu/xma_context_new.h"
+#include "xenia/apu/xma_context_old.h"
+
+#include "xenia/base/cvar.h"
+#if XE_PLATFORM_xendroid
+#include <sys/resource.h>
+#endif
+
+#include <cerrno>
+#include <chrono>
+#include <cstring>
+#include "xenia/base/logging.h"
+#include "xenia/base/math.h"
+#include "xenia/base/profiling.h"
+#include "xenia/base/ring_buffer.h"
+#include "xenia/base/string_buffer.h"
+#include "xenia/cpu/processor.h"
+#include "xenia/cpu/thread_state.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xthread.h"
+extern "C" {
+#include "third_party/FFmpeg/libavutil/log.h"
+}  // extern "C"
+
+// As with normal Microsoft, there are like twelve different ways to access
+// the audio APIs. Early games use XMA*() methods almost exclusively to touch
+// decoders. Later games use XAudio*() and direct memory writes to the XMA
+// structures (as opposed to the XMA* calls), meaning that we have to support
+// both.
+//
+// The XMA*() functions just manipulate the audio system in the guest context
+// and let the normal XmaDecoder handling take it, to prevent duplicate
+// implementations. They can be found in xboxkrnl_audio_xma.cc
+//
+// XMA details:
+// https://devel.nuclex.org/external/svn/directx/trunk/include/xma2defs.h
+// https://github.com/gdawg/fsbext/blob/master/src/xma_header.h
+//
+// XAudio2 uses XMA under the covers, and seems to map with the same
+// restrictions of frame/subframe/etc:
+// https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.xaudio2.xaudio2_buffer(v=vs.85).aspx
+//
+// XMA contexts are 64b in size and tight bitfields. They are in physical
+// memory not usually available to games. Games will use MmMapIoSpace to get
+// the 64b pointer in user memory so they can party on it. If the game doesn't
+// do this, it's likely they are either passing the context to XAudio or
+// using the XMA* functions.
+
+DEFINE_bool(ffmpeg_verbose, false, "Verbose FFmpeg output (debug and above)",
+            "APU");
+
+DECLARE_bool(apu_aaudio_log_stats);
+
+DEFINE_bool(use_dedicated_xma_thread, true,
+            "Enables XMA decoding on separate thread. Disabled should produce "
+            "better results, but decrease performance a bit.",
+            "APU");
+
+DEFINE_string(
+    xma_decoder, "new",
+    "Decoder version used to process XMA audio.\n"
+    "Use: [fake, master, old, new]\n"
+    " fake: \n  No audio will be decoded.\n"
+    " master: \n  Version of decoder exactly like on base version of Xenia.\n"
+    " old: \n  Decoder based on master version of decoder with few "
+    "improvements.\n"
+    " new: \n  New version of decoder. Provides highest stability, but isn't "
+    "yet finished.\n",
+    "APU");
+
+UPDATE_from_string(xma_decoder, 2026, 2, 16, 12, "old");
+
+namespace xe {
+namespace apu {
+
+XmaDecoder::XmaDecoder(cpu::Processor* processor)
+    : memory_(processor->memory()), processor_(processor) {}
+
+XmaDecoder::~XmaDecoder() = default;
+
+void av_log_callback(void* avcl, int level, const char* fmt, va_list va) {
+  if (!cvars::ffmpeg_verbose && level > AV_LOG_WARNING) {
+    return;
+  }
+
+  char level_char = '?';
+  LogLevel log_level;
+  switch (level) {
+    case AV_LOG_ERROR: {
+      level_char = '!';
+      log_level = xe::LogLevel::Error;
+      break;
+    }
+    case AV_LOG_WARNING: {
+      level_char = 'w';
+      log_level = xe::LogLevel::Warning;
+      break;
+    }
+    case AV_LOG_INFO: {
+      level_char = 'i';
+      log_level = xe::LogLevel::Info;
+      break;
+    }
+    case AV_LOG_VERBOSE: {
+      level_char = 'v';
+      log_level = xe::LogLevel::Debug;
+      break;
+    }
+    case AV_LOG_DEBUG: {
+      level_char = 'd';
+      log_level = xe::LogLevel::Debug;
+      break;
+    }
+    default: {
+      level_char = '?';
+      log_level = xe::LogLevel::Debug;
+      break;
+    }
+  }
+
+  StringBuffer buff;
+  buff.AppendVarargs(fmt, va);
+  xe::logging::AppendLogLineFormat(LogSrc::Apu, log_level, level_char,
+                                   "ffmpeg: {}", buff.to_string_view());
+}
+
+X_STATUS XmaDecoder::Setup(kernel::KernelState* kernel_state) {
+  // Setup ffmpeg logging callback
+  av_log_set_callback(av_log_callback);
+
+  // Let the processor know we want register access callbacks.
+  memory_->AddVirtualMappedRange(
+      0x7FEA0000, 0xFFFF0000, 0x0000FFFF, this,
+      reinterpret_cast<cpu::MMIOReadCallback>(MMIOReadRegisterThunk),
+      reinterpret_cast<cpu::MMIOWriteCallback>(MMIOWriteRegisterThunk));
+
+  // Setup XMA context data.
+  // The Xbox 360 kernel allocates the contexts with X_PAGE_NOCACHE |
+  // X_PAGE_READWRITE and writes MmGetPhysicalAddress for the address to the
+  // register.
+  context_data_first_ptr_ = memory()->SystemHeapAlloc(
+      sizeof(XMA_CONTEXT_DATA) * kContextCount, 256, kSystemHeapPhysical);
+  context_data_last_ptr_ =
+      context_data_first_ptr_ + (sizeof(XMA_CONTEXT_DATA) * kContextCount - 1);
+  register_file_[XmaRegister::ContextArrayAddress] =
+      memory()->GetPhysicalAddress(context_data_first_ptr_);
+
+  // Setup XMA contexts.
+  for (int i = 0; i < kContextCount; ++i) {
+    if (cvars::xma_decoder == "fake") {
+      contexts_[i] = new XmaContextFake();
+    } else if (cvars::xma_decoder == "master") {
+      contexts_[i] = new XmaContextMaster();
+    } else if (cvars::xma_decoder == "old") {
+      contexts_[i] = new XmaContextOld();
+    } else if (cvars::xma_decoder == "new") {
+      contexts_[i] = new XmaContextNew();
+    } else if (cvars::xma_decoder == "fake") {
+      contexts_[i] = new XmaContextFake();
+    } else {
+      contexts_[i] = new XmaContextNew();
+    }
+
+    uint32_t guest_ptr = context_data_first_ptr_ + i * sizeof(XMA_CONTEXT_DATA);
+    if (contexts_[i]->Setup(i, memory(), guest_ptr)) {
+      assert_always();
+    }
+  }
+  register_file_[XmaRegister::NextContextIndex] = 1;
+  context_bitmap_.Resize(kContextCount);
+
+  worker_running_ = true;
+  work_event_ = xe::threading::Event::CreateAutoResetEvent(false);
+  assert_not_null(work_event_);
+  worker_thread_ =
+      kernel::object_ref<kernel::XHostThread>(new kernel::XHostThread(
+          kernel_state, 128 * 1024, 0,
+          [this]() {
+            if (cvars::use_dedicated_xma_thread) {
+              WorkerThreadMain();
+            }
+            return 0;
+          },
+          kernel_state
+              ->GetIdleProcess()));  // this one doesnt need any process
+                                     // actually. never calls any guest code
+  worker_thread_->set_name("XMA Decoder");
+  worker_thread_->set_can_debugger_suspend(true);
+  worker_thread_->Create();
+
+  return X_STATUS_SUCCESS;
+}
+
+void XmaDecoder::WorkerThreadMain() {
+
+#if XE_PLATFORM_xendroid
+  // Set here, not at the creation site: XThread applies its own priority
+  // after Create, and its kNormal maps to nice 4, below the Android default.
+  errno = 0;
+  if (setpriority(PRIO_PROCESS, 0, -12) != 0) {
+    XELOGW("XMA Decoder: setpriority(-12) failed: errno {} ({})", errno,
+           std::strerror(errno));
+  }
+#endif
+  // Whether decode keeps up. If this thread is saturated, the guest mixer has
+  // nothing to submit and the audio queue drains even though the audio worker
+  // is running normally.
+  auto stats_last = std::chrono::steady_clock::now();
+  uint64_t passes = 0, worked_contexts = 0, work_ns = 0, idle_waits = 0;
+  uint64_t last_decoded = 0, last_no_out = 0, last_consume_empty = 0,
+           last_no_space = 0;
+
+  worker_loop_active_.store(true, std::memory_order_release);
+  while (worker_running_) {
+    // Okay, let's loop through XMA contexts to find ones we need to decode!
+    bool did_work = false;
+    const bool measure = cvars::apu_aaudio_log_stats;
+    const auto pass_begin = measure ? std::chrono::steady_clock::now()
+                                    : std::chrono::steady_clock::time_point{};
+    for (uint32_t n = 0; n < kContextCount; n++) {
+      bool worked = contexts_[n]->Work();
+      if (!worked && contexts_[n]->is_enabled() &&
+          !contexts_[n]->is_allocated()) {
+        // Consume a kick on an unallocated context so its kicker is released.
+        contexts_[n]->set_is_enabled(false);
+        worked = true;
+      }
+      if (worked) {
+        // After Work() wrote the guest-visible context data back.
+        contexts_[n]->CompleteConsumedKick();
+        if (measure) {
+          ++worked_contexts;
+        }
+      }
+      did_work = did_work || worked;
+    }
+    if (measure) {
+      ++passes;
+      work_ns += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - pass_begin)
+              .count());
+      const auto now = std::chrono::steady_clock::now();
+      if (now - stats_last >= std::chrono::seconds(1)) {
+        uint64_t no_out = 0, consume_empty = 0, no_space = 0, decoded = 0;
+        GetXmaBailStats(&no_out, &consume_empty, &no_space, &decoded);
+        XELOGI(
+            "XmaWork: {} passes, {} context decodes, busy {:.1f}ms/s "
+            "({:.1f}% of wall), {} idle waits",
+            passes, worked_contexts, double(work_ns) / 1e6,
+            double(work_ns) / 1e7, idle_waits);
+        XELOGI(
+            "XmaBail: decoded {} | no output buffer {} | consume empty {} "
+            "| no ring space {} (deltas)",
+            decoded - last_decoded, no_out - last_no_out,
+            consume_empty - last_consume_empty, no_space - last_no_space);
+        last_decoded = decoded;
+        last_no_out = no_out;
+        last_consume_empty = consume_empty;
+        last_no_space = no_space;
+        passes = 0;
+        worked_contexts = 0;
+        work_ns = 0;
+        idle_waits = 0;
+        stats_last = now;
+      }
+    }
+
+    if (paused_) {
+      pause_fence_.Signal();
+      resume_fence_.Wait();
+    }
+
+    if (did_work) {
+      continue;
+    }
+    if (cvars::apu_aaudio_log_stats) {
+      ++idle_waits;
+    }
+    xe::threading::Wait(work_event_.get(), false);
+  }
+  worker_loop_active_.store(false, std::memory_order_release);
+}
+
+void XmaDecoder::Shutdown() {
+  worker_running_ = false;
+
+  if (work_event_) {
+    work_event_->Set();
+  }
+
+  if (paused_) {
+    Resume();
+  }
+
+  if (worker_thread_) {
+    // Wait for work thread.
+    xe::threading::Wait(worker_thread_->thread(), false);
+    worker_thread_.reset();
+  }
+
+  if (context_data_first_ptr_) {
+    memory()->SystemHeapFree(context_data_first_ptr_);
+  }
+
+  context_data_first_ptr_ = 0;
+  context_data_last_ptr_ = 0;
+}
+
+int XmaDecoder::GetContextId(uint32_t guest_ptr) {
+  static_assert_size(XMA_CONTEXT_DATA, 64);
+  if (guest_ptr < context_data_first_ptr_ ||
+      guest_ptr > context_data_last_ptr_) {
+    return -1;
+  }
+  assert_zero(guest_ptr & 0x3F);
+  return (guest_ptr - context_data_first_ptr_) >> 6;
+}
+
+uint32_t XmaDecoder::AllocateContext() {
+  size_t index = context_bitmap_.Acquire();
+  if (index == -1) {
+    // Out of contexts.
+    return 0;
+  }
+
+  XmaContext& context = *contexts_[index];
+  assert_false(context.is_allocated());
+  context.set_is_allocated(true);
+  return context.guest_ptr();
+}
+
+void XmaDecoder::ReleaseContext(uint32_t guest_ptr) {
+  auto context_id = GetContextId(guest_ptr);
+  assert_true(context_id >= 0);
+
+  XmaContext& context = *contexts_[context_id];
+  assert_true(context.is_allocated());
+  context.Release();
+  // Release takes lock_, so no Work() is in flight; free any waiter that
+  // kicked this context just before the guest tore it down.
+  context.CancelPendingKicks();
+  context_bitmap_.Release(context_id);
+}
+
+bool XmaDecoder::BlockOnContext(uint32_t guest_ptr, bool poll) {
+  auto context_id = GetContextId(guest_ptr);
+  assert_true(context_id >= 0);
+
+  XmaContext& context = *contexts_[context_id];
+  return context.Block(poll);
+}
+
+uint32_t XmaDecoder::ReadRegister(uint32_t addr) {
+  auto r = (addr & 0xFFFF) / 4;
+
+  assert_true(r < XmaRegisterFile::kRegisterCount);
+
+  switch (r) {
+    case XmaRegister::ContextArrayAddress:
+      break;
+    case XmaRegister::CurrentContextIndex: {
+      // 0606h (1818h) is rotating context processing # set to hardware ID of
+      // context being processed.
+      // If bit 200h is set, the locking code will possibly collide on hardware
+      // IDs and error out, so we should never set it (I think?).
+      uint32_t& current_context_index =
+          register_file_[XmaRegister::CurrentContextIndex];
+      uint32_t& next_context_index =
+          register_file_[XmaRegister::NextContextIndex];
+      // To prevent games from seeing a stuck XMA context, return a rotating
+      // number.
+      current_context_index = next_context_index;
+      next_context_index = (next_context_index + 1) % kContextCount;
+      break;
+    }
+    default:
+      const auto register_info = register_file_.GetRegisterInfo(r);
+      if (register_info) {
+        XELOGW("XMA: Read from unhandled register ({:04X}, {})", r,
+               register_info->name);
+      } else {
+        XELOGW("XMA: Read from unknown register ({:04X})", r);
+      }
+      break;
+  }
+
+  return xe::byte_swap(register_file_[r]);
+}
+
+void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
+  SCOPE_profile_cpu_f("apu");
+
+  uint32_t r = (addr & 0xFFFF) / 4;
+  value = xe::byte_swap(value);
+
+  assert_true(r < XmaRegisterFile::kRegisterCount);
+  register_file_[r] = value;
+
+  if (r >= XmaRegister::Context0Kick && r <= XmaRegister::Context9Kick) {
+    // Context kick command.
+    // This will kick off the given hardware contexts.
+    // Basically, this kicks the SPU and says "hey, decode that audio!"
+    // XMAEnableContext
+
+    // The context ID is a bit in the range of the entire context array.
+    const uint32_t base_context_id = (r - XmaRegister::Context0Kick) * 32;
+    const uint32_t kicked_value = value;
+    const bool dedicated = cvars::use_dedicated_xma_thread;
+    // One sequence per kicked context, so each wait below is satisfied only by
+    // its own kick being serviced or cancelled.
+    uint64_t kick_seqs[32] = {};
+    while (value) {
+      const uint32_t context_id = base_context_id + std::countr_zero(value);
+      auto& context = *contexts_[context_id];
+      kick_seqs[context_id - base_context_id] = context.BeginKick();
+      if (!dedicated) {
+        if (context.Work()) {
+          context.CompleteConsumedKick();
+        }
+      }
+      value &= value - 1;
+    }
+    // Signal the decoder thread to start processing.
+    work_event_->SetBoostPriority();
+    if (dedicated) {
+      // Block until the worker finishes, so the game sees updated context data.
+      uint32_t remaining = kicked_value;
+      while (remaining) {
+        const uint32_t bit = std::countr_zero(remaining);
+        contexts_[base_context_id + bit]->WaitForKick(kick_seqs[bit]);
+        remaining &= remaining - 1;
+      }
+    }
+  } else if (r >= XmaRegister::Context0Lock && r <= XmaRegister::Context9Lock) {
+    // Context lock command.
+    // This requests a lock by flagging the context.
+    // XMADisableContext
+    const uint32_t base_context_id = (r - XmaRegister::Context0Lock) * 32;
+    while (value) {
+      const uint32_t context_id = base_context_id + std::countr_zero(value);
+      auto& context = *contexts_[context_id];
+      context.Disable();
+      // Ensure the worker isn't mid-processing this context.
+      context.Block(false);
+      // A kick this Lock just disarmed will never be serviced, so resolve it
+      // here or its kicking thread waits for a later kick's completion.
+      context.CancelPendingKicks();
+      value &= value - 1;
+    }
+  } else if (r >= XmaRegister::Context0Clear &&
+             r <= XmaRegister::Context9Clear) {
+    // Context clear command.
+    // This will reset the given hardware contexts.
+    const uint32_t base_context_id = (r - XmaRegister::Context0Clear) * 32;
+    while (value) {
+      const uint32_t context_id = base_context_id + std::countr_zero(value);
+      auto& context = *contexts_[context_id];
+      context.Clear();
+      context.CancelPendingKicks();
+      value &= value - 1;
+    }
+  } else {
+    // 0601h (1804h) is written to with 0x02000000 and 0x03000000 around a lock
+    // operation
+    switch (r) {
+      case 0x601:
+        break;
+      default: {
+        const auto register_info = register_file_.GetRegisterInfo(r);
+        if (register_info) {
+          XELOGW("XMA: Write to unhandled register ({:04X}, {}): {:08X}", r,
+                 register_info->name, value);
+        } else {
+          XELOGW("XMA: Write to unknown register ({:04X}): {:08X}", r, value);
+        }
+        break;
+      }
+#pragma warning(suppress : 4065)
+    }
+  }
+}
+
+void XmaDecoder::Pause() {
+  if (paused_) {
+    return;
+  }
+  paused_ = true;
+
+  // Wake the worker if it's parked idle (no active XMA contexts) so it can
+  // reach the pause check and ack - otherwise this fence deadlocks the
+  // pauser (e.g. the guest-crash handler hanging before it logs anything).
+  if (work_event_) {
+    work_event_->Set();
+  }
+
+  // With inline decoding there is no worker loop to quiesce, so nothing will
+  // ever signal the fence: waiting here hangs the caller, and the pause comes
+  // from the UI thread.
+  if (worker_loop_active_.load(std::memory_order_acquire)) {
+    pause_fence_.Wait();
+  }
+}
+
+void XmaDecoder::Resume() {
+  if (!paused_) {
+    return;
+  }
+  paused_ = false;
+
+  if (worker_loop_active_.load(std::memory_order_acquire)) {
+    resume_fence_.Signal();
+  }
+}
+
+}  // namespace apu
+}  // namespace xe

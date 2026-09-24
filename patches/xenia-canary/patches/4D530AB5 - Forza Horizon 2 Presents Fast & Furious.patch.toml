@@ -1,0 +1,32 @@
+title_name = "Forza Horizon 2 Presents Fast & Furious"
+title_id = "4D530AB5" # MS-2741
+hash = "8C3DE088F2294F02" # default.xex
+#media_id = "11BC0A01" # XBL Marketplace: CE244B3FDB40B753497B43F6F2C90D4C4D
+
+[[patch]]
+    name = "Disable Motion Blur"
+    author = "Mutantovich, Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82df080c
+        value = 0x60000000
+
+[[patch]]
+    name = "Disable Shadows"
+    author = "illusion, Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82432300
+        value = 0x39600000
+
+[[patch]]
+    name = "Disable hash checks"
+    desc = "Allows modifying protected files."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x83540004
+        value = 0x60000000

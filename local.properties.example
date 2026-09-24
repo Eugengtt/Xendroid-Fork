@@ -1,0 +1,21 @@
+# Copy this file to local.properties and adjust the paths for your machine.
+# local.properties is git-ignored: it holds machine-local paths only.
+#
+# IMPORTANT (Windows): in a .properties file a backslash is an escape character.
+# Use forward slashes (simplest) OR double every backslash:
+#   sdk.dir=C:/Users/you/AppData/Local/Android/Sdk        <-- recommended
+#   sdk.dir=C:\\Users\\you\\AppData\\Local\\Android\\Sdk  <-- also valid
+
+# Android SDK location (contains platform-tools/, ndk/, cmake/, ...).
+#   Linux:   sdk.dir=/home/you/Android/Sdk
+#   Windows: sdk.dir=C:/Users/you/AppData/Local/Android/Sdk
+sdk.dir=/path/to/Android/Sdk
+
+# CMake used for the native build. MUST be the 3.30.3 that the Gradle
+# externalNativeBuild block pins (emulator-core/build.gradle: cmake { version '3.30.3' }).
+# Pointing here avoids a newer system cmake on PATH (e.g. a pip-installed
+# ~/.local/bin/cmake, or distro /usr/bin/cmake 4.x) shadowing the SDK one.
+# Install it with: sdkmanager "cmake;3.30.3"   (Windows: sdkmanager.bat "cmake;3.30.3")
+#   Linux:   cmake.dir=/home/you/Android/Sdk/cmake/3.30.3
+#   Windows: cmake.dir=C:/Users/you/AppData/Local/Android/Sdk/cmake/3.30.3
+cmake.dir=/path/to/Android/Sdk/cmake/3.30.3

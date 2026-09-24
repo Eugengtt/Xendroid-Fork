@@ -1,0 +1,37 @@
+title_name = "Rise of the Argonauts"
+title_id = "434D07DE" # CM-2014
+hash = "1829F77474D8740D" # default.xex
+#media_id = "43140262" # Disc (USA, Europe): http://redump.org/disc/14547
+
+[[patch]]
+    name = "Unlock FPS"
+    desc = "See note about framerate patches in the README."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x825fb72c
+        value = 0x60000000
+    [[patch.be8]]
+        address = 0x8292c35b
+        value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Black Shading Fix"
+    desc = "Disables MSAA"
+    author = "HouseofTudor, Sowa_95"
+    is_enabled = false
+
+    [[patch.be8]]
+        address = 0x83893fe3
+        value = 0x04
+
+[[patch]]
+    name = "16x Anisotropic Filtering"
+    desc = "This game has moderate texture streaming issues, 16xAF could potentially make it worse."
+    author = "Sowa_95"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x824b061c
+        value = 0x38a00010
