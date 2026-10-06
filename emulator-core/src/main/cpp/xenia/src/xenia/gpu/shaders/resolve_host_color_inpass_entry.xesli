@@ -1,0 +1,136 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+// In-pass fragment resolve: reads the current color attachment via
+// VK_KHR_dynamic_rendering_local_read and stores the packed guest-tiled data
+// to the destination range in shared memory, without ending the render pass.
+// One fragment = one resolved pixel; the draw's scissor must exactly cover the
+// host-texel image of the (affine-eligible) dump rectangle.
+
+#include "endian.xesli"
+#include "resolve.xesli"
+#include "resolve_host_color_pack.xesli"
+
+#if !SHADING_LANGUAGE_GLSL_XE
+  #error In-pass resolve entry is SPIR-V (GLSL flavor) only.
+#endif
+
+#if XE_RESOLVE_HOST_COLOR_BPP == 64
+byte_buffer_align8_wo_declare_xe(xe_resolve_dest, 0, 0, u0, space0, 1)
+#else
+byte_buffer_align4_wo_declare_xe(xe_resolve_dest, 0, 0, u0, space0, 1)
+#endif
+
+#if XE_RESOLVE_INPASS_TEXTURE
+  // Destination texture, viewed as raw uints so the already-packed guest texel
+  // can be stored with no format conversion.
+  #if XE_RESOLVE_HOST_COLOR_BPP == 64
+layout(set = 2, binding = 0, rg32ui) uniform writeonly uimage2D
+    xe_resolve_inpass_texture;
+  #else
+layout(set = 2, binding = 0, r32ui) uniform writeonly uimage2D
+    xe_resolve_inpass_texture;
+  #endif
+#endif
+
+#if XE_RESOLVE_INPASS_MSAA
+layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInputMS
+    xe_resolve_inpass_source;
+#else
+layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInput
+    xe_resolve_inpass_source;
+#endif
+
+void main() {
+  XeResolveInfo resolve_info = XeResolveGetInfo(pass_push_consts_xe);
+  uint2_xe pixel_index = uint2_xe(
+      int2_xe(gl_FragCoord.xy) +
+      int2_xe(push_const_xe(xe_resolve_frag_to_pixel_offset_x),
+              push_const_xe(xe_resolve_frag_to_pixel_offset_y)));
+#if XE_RESOLVE_INPASS_MSAA
+  int sample_info = push_const_xe(xe_resolve_inpass_sample);
+  float4_xe color = subpassLoad(xe_resolve_inpass_source, sample_info & 0xFF);
+  if ((sample_info & 0x10000) != 0) {
+    color = (color + subpassLoad(xe_resolve_inpass_source,
+                                 (sample_info >> 8) & 0xFF)) *
+            0.5f;
+  }
+#else
+  float4_xe color = subpassLoad(xe_resolve_inpass_source);
+#endif
+
+  // Parity with XeResolveLoad2RGBAColors: the destination exponent-bias factor
+  // is applied after sample averaging (the averaging 0.5 is explicit above,
+  // where the full path folds it into the factor instead). RGB-only for
+  // 7e3-float EDRAM (alpha is 2-bit fixed point) unless the destination can
+  // store alpha > 1.
+  dont_flatten_xe
+  if ((resolve_info.edram_format ==
+           kXenosColorRenderTargetFormat_2_10_10_10_FLOAT ||
+       resolve_info.edram_format ==
+           kXenosColorRenderTargetFormat_2_10_10_10_FLOAT_AS_16_16_16_16) &&
+      resolve_info.dest_format != kXenosFormat_16_16_16_16_FLOAT &&
+      resolve_info.dest_format != kXenosFormat_32_32_32_32_FLOAT) {
+    color.xyz *= resolve_info.dest_exp_bias_factor;
+  } else {
+    color *= resolve_info.dest_exp_bias_factor;
+  }
+#if XE_RESOLVE_HOST_COLOR_BPP == 64
+  uint2_xe packed_pixel =
+      XeResolveHostColorPack64Float(color, resolve_info.edram_format);
+  if (resolve_info.dest_swap &&
+      (resolve_info.edram_format == kXenosColorRenderTargetFormat_16_16_16_16 ||
+       resolve_info.edram_format ==
+           kXenosColorRenderTargetFormat_16_16_16_16_FLOAT)) {
+    packed_pixel =
+        (packed_pixel & ~0xFFFFu) | (packed_pixel.yx & 0xFFFFu);
+  }
+#if XE_RESOLVE_INPASS_TEXTURE
+  imageStore(xe_resolve_inpass_texture,
+             int2_xe(pixel_index) +
+                 int2_xe(push_const_xe(xe_resolve_inpass_texture_x0),
+                         push_const_xe(xe_resolve_inpass_texture_y0)),
+             uint4_xe(packed_pixel.x, packed_pixel.y, 0u, 0u));
+#endif
+  uint dest_address = XeResolveDestPixelAddress(resolve_info, pixel_index, 3u);
+  byte_buffer_align8_store8_xe(
+      xe_resolve_dest, dest_address,
+      XeEndianSwap64(packed_pixel, resolve_info.dest_endian_128));
+#else
+  uint packed_pixel =
+      XeResolveHostColorPack32Float(color, resolve_info.edram_format);
+  if (resolve_info.dest_swap) {
+    switch (resolve_info.edram_format) {
+      case kXenosColorRenderTargetFormat_8_8_8_8:
+      case kXenosColorRenderTargetFormat_8_8_8_8_GAMMA:
+        packed_pixel = XeResolveSwapRedBlue_8_8_8_8(uint4_xe(
+            packed_pixel, packed_pixel, packed_pixel, packed_pixel)).x;
+        break;
+      case kXenosColorRenderTargetFormat_2_10_10_10:
+      case kXenosColorRenderTargetFormat_2_10_10_10_FLOAT:
+      case kXenosColorRenderTargetFormat_2_10_10_10_AS_10_10_10_10:
+      case kXenosColorRenderTargetFormat_2_10_10_10_FLOAT_AS_16_16_16_16:
+        packed_pixel = XeResolveSwapRedBlue_2_10_10_10(uint4_xe(
+            packed_pixel, packed_pixel, packed_pixel, packed_pixel)).x;
+        break;
+    }
+  }
+#if XE_RESOLVE_INPASS_TEXTURE
+  imageStore(xe_resolve_inpass_texture,
+             int2_xe(pixel_index) +
+                 int2_xe(push_const_xe(xe_resolve_inpass_texture_x0),
+                         push_const_xe(xe_resolve_inpass_texture_y0)),
+             uint4_xe(packed_pixel, 0u, 0u, 0u));
+#endif
+  uint dest_address = XeResolveDestPixelAddress(resolve_info, pixel_index, 2u);
+  byte_buffer_align4_store4_xe(
+      xe_resolve_dest, dest_address,
+      XeEndianSwap32(packed_pixel, resolve_info.dest_endian_128));
+#endif
+}

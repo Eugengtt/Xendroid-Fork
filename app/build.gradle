@@ -1,0 +1,123 @@
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.kotlin.serialization)
+}
+
+// New Kotlin/Jetpack-Compose frontend. Depends on :emulator-core for the native
+// build (libe.so) + JNI boundary. Distinct applicationId so it installs alongside
+// the legacy build during the rewrite.
+
+// Bundle the xenia-canary game patches into assets/game-patches/.
+def gamePatchesGenDir = layout.buildDirectory.dir("generated/gamePatches")
+def syncGamePatches = tasks.register('syncGamePatches', Copy) {
+    into gamePatchesGenDir.map { it.dir("game-patches") }
+    from("$rootDir/patches/xenia-canary/patches") { include '*.patch.toml' }
+}
+// AGP doesn't honor the assets.srcDir(...).builtBy() hint, so wire the sync in explicitly.
+tasks.named('preBuild').configure { dependsOn(syncGamePatches) }
+
+android {
+    namespace 'xendroid.compose'
+    compileSdk 35
+    // Pin like :emulator-core - without this AGP wants its default NDK for the
+    // strip task; when that NDK is absent (CI) it packages libe.so UNSTRIPPED.
+    ndkVersion '29.0.14206865'
+
+    defaultConfig {
+        applicationId 'xendroid.compose'
+        // 29+ matches :emulator-core (native ELF TLS in libe.so).
+        minSdk 29
+        targetSdk 35
+        versionCode 1
+        versionName project.findProperty("gitHash") ?: "unknown"
+        
+    }
+
+    sourceSets {
+        main {
+            assets.srcDir(files(gamePatchesGenDir).builtBy(syncGamePatches))
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    kotlinOptions {
+        jvmTarget = '11'
+    }
+    buildFeatures {
+        compose true
+        buildConfig true
+    }
+    // HWASan builds link against the shared sanitizer runtime, which has to
+    // ship inside the APK: the platform copy is not on a normal app's search
+    // path. Sourced from the NDK that compiled the code, so the runtime and
+    // the instrumentation always match.
+    // wrap.sh sets LD_HWASAN=1, which puts the whole process on the platform's
+    // HWASan libc. That must only happen in the sanitizer build: packaging it
+    // unconditionally leaves normal builds running on the hwasan allocator,
+    // which quietly changes both stability and profiling.
+    if (System.getenv('XENDROID_HWASAN') == 'true') {
+        sourceSets {
+            main {
+                resources.srcDirs += 'src/hwasan-res'
+            }
+        }
+    }
+
+    packaging {
+        // libe.so from :emulator-core is stored uncompressed (matches core).
+        jniLibs.useLegacyPackaging = true
+        resources {
+            excludes += '/META-INF/{AL2.0,LGPL2.1}'
+        }
+    }
+
+    buildTypes {
+        // Own application id so a debug build installs alongside a release one.
+        // The java namespace stays xendroid.compose, so JNI FindClass is unaffected.
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+release {
+    applicationIdSuffix '.fork'
+    minifyEnabled false
+    shrinkResources false
+      }
+        
+    }
+}
+
+androidComponents {
+    onVariants(selector().withBuildType('release')) { variant ->
+        variant.packaging.jniLibs.excludes.add('**/libVkLayer_*.so')
+    }
+}
+
+dependencies {
+    implementation project(':emulator-core')
+
+    implementation platform(libs.compose.bom)
+    implementation libs.compose.ui
+    implementation libs.compose.ui.graphics
+    implementation libs.compose.ui.tooling.preview
+    implementation libs.compose.material3
+    implementation libs.androidx.activity.compose
+    implementation libs.androidx.navigation.compose
+    implementation libs.androidx.lifecycle.viewmodel.compose
+    implementation libs.androidx.lifecycle.runtime.compose
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("com.squareup.retrofit2:retrofit:2.11.0")
+    implementation("com.squareup.retrofit2:converter-gson:2.11.0")
+    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+    debugImplementation libs.compose.ui.tooling
+    implementation libs.coil.compose
+    implementation libs.kotlinx.serialization.json
+    implementation libs.androidx.datastore.preferences
+    testImplementation libs.junit
+    testImplementation libs.kotlinx.coroutines.test
+}

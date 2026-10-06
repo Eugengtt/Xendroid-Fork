@@ -1,0 +1,42 @@
+title_name = "Need for Speed: Most Wanted" # NFS (2005)
+title_id = "454107D9" # EA-2009
+hash = [ # default.xex
+    "406DA35685AD7559", # PAL-ENG
+    "75548947DB063F37", # PAL-GER
+    "2B596DB6DF23684F", # PAL-ITA
+    "AD0425433CB1FD7D", # NTSC-J
+    "B001C754E3DB6C0B", # PAL-SPA
+    "FB9D1825EAC7AA75"  # NTSC-U
+]
+#media_id = [
+#    "36775B18", # Disc (Europe):   http://redump.org/disc/55849
+#    "00000000", # Disc (Germany):  http://redump.org/disc/73244
+#    "00000000", # Disc (Italy):    http://redump.org/disc/66281
+#    "0E7D604D", # Disc (Japan):    http://redump.org/disc/59055
+#    "00000000", # Disc (Spain):    http://redump.org/disc/21641
+#    "00000000"  # Disc (USA):      http://redump.org/disc/16682
+#]
+
+[[patch]]
+    name = "Disable Post Processing"
+    author = "illusion"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82224710
+        value = 0x39400000
+    [[patch.be32]]
+        address = 0x8222442c
+        value = 0x39200000
+
+[[patch]]
+    name = "Skip audio loop stuck code"
+    author = "Gliniak"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x825e1d3c
+        value = 0x2f050001
+    [[patch.be32]]
+        address = 0x825e1d40
+        value = 0x419a0010

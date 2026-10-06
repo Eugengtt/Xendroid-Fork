@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Window/launch theme before Compose draws. Platform Material NoActionBar
+         (no XML Material Components dependency needed for a pure-Compose Activity);
+         the in-app look comes from xendroidTheme (Material 3, Compose). -->
+    <style name="Theme.xendroidCompose" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!-- SP1-C emulator host: fullscreen, no chrome (legacy used
+         Theme.NoTitleBar.Fullscreen). The Vulkan surface owns the whole screen. -->
+    <style name="Theme.xendroidEmu"
+        parent="android:Theme.Material.NoActionBar.Fullscreen" />
+</resources>

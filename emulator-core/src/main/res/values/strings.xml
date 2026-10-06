@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Used by DocumentsProvider (core's R). The consuming app declares its own
+         app_name independently for its launcher label. -->
+    <string name="app_name">xendroid</string>
+</resources>

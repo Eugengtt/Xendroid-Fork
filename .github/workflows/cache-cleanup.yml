@@ -1,0 +1,45 @@
+name: Cache cleanup
+
+on:
+  workflow_run:
+    workflows: [XenDroid]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+concurrency:
+  group: cache-cleanup
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Drop stale caches (keep newest per key)
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        set -uo pipefail
+
+        gh cache list --limit 200 --json id,key,createdAt \
+          --jq 'sort_by(.createdAt) | reverse | .[] | "\(.id)\t\(.key)"' > caches.tsv
+
+        seen=""
+        deleted=0
+        while IFS=$'\t' read -r id key; do
+          [ -n "${id:-}" ] || continue
+
+          base=$(printf '%s' "$key" | sed -E 's/-[0-9a-f]{16,}$//')
+          if printf '%s\n' "$seen" | grep -qxF -- "$base"; then
+            echo "delete stale: $key (id=$id)"
+            gh cache delete "$id" || echo "<warning> failed to delete cache $id"
+            deleted=$((deleted + 1))
+          else
+            seen="${seen}${base}"$'\n'
+          fi
+        done < caches.tsv
+
+        echo "Pruned $deleted stale cache(s); kept newest per key."

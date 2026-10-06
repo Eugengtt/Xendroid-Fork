@@ -1,0 +1,18 @@
+title_name = "The Simpsons Game"
+title_id = "45410809" # EA-2057
+hash = "AC429E9FFB91904C" # default.xex
+#media_id = "05631042" # Disc (USA): http://redump.org/disc/12510
+
+[[patch]]
+    name = "60 FPS"
+    desc = "Unlocks the framerate to 60 FPS. No clipping, collision bugs, or animation issues."
+    author = "tronuo"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x82867a70
+        value = 0x38800001
+
+    [[patch.be32]]
+        address = 0x82159238
+        value = 0x3c88ab86
