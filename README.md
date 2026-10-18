@@ -30,3 +30,5 @@ Users are legally required to dump and use only their own legally acquired game 
 * Original XenDroid project by **[rfandango](https://github.com/rfandango)**.*
 ## Discord 
 https://discord.gg/CeXJE5yck
+## Youtube 
+https://www.youtube.com/@EUGENGTT
