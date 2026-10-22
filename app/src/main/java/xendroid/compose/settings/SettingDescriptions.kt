@@ -129,7 +129,7 @@ object SettingDescriptions {
         "vulkan_resolve_to_texture" to "Have in-pass resolves write the destination texture directly; needs the promote toggle, pairs with skip upload",
         "vulkan_resolve_to_texture_promote" to "Allocate resolve-target textures so a resolve can write them directly; costs framebuffer compression on those textures",
         "vulkan_resolve_to_texture_serve" to "Skip re-uploading textures an in-pass resolve already filled this frame; this is where the round-trip traffic disappears",
-        "vulkan_lib_path" to "Path to a custom Vulkan driver library (e.g. Turnip) to load instead of the system driver",
+        "vulkan_lib_path" to "Path to a custom Vulkan driver library (Snapdragon/Adreno, Mali/PanVK or Exynos/Xclipse) to load instead of the system driver",
         "vulkan_log_debug_messages" to "Write Vulkan debug-utils messages to the emulator log instead of the system debug output",
         "vulkan_mid_frame_submission_draws" to "Submit GPU work after this many draws instead of once per frame; 0 off, too low hurts tiled GPUs",
         "vulkan_pipeline_creation_threads" to "Threads used to build graphics pipelines: -1 auto, 0 single-threaded, or an explicit count",

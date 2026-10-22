@@ -175,3 +175,13 @@ local.properties
 .gradle/
 .cxx/
 build/
+*.jks
+*.JKS
+*.keystore
+*.apk
+*.APK
+Xendroid-red.jpg
+local.properties
+.gradle/
+**/build/
+**/.cxx/

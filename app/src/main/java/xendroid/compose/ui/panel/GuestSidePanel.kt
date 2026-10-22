@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Divider
 import androidx.compose.material3.DrawerValue
+import androidx.compose.foundation.Image
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Slider
@@ -33,6 +35,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.LocalContext
+import xendroid.compose.R
 import kotlin.math.roundToInt
 
 @Composable
@@ -365,6 +372,19 @@ fun GuestSidePanel(
                     Spacer(
                         modifier = Modifier.height(8.dp)
                     )
+
+                    // SOCIAL LINKS (YouTube / Discord) — at the bottom of the menu
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        SocialButton("YouTube", "https://www.youtube.com/@EUGENGTT")
+                        SocialButton("Discord", "https://discord.gg/NkVPBtUw9")
+                    }
+
+                    Spacer(
+                        modifier = Modifier.height(12.dp)
+                    )
                 }
             }
         },
@@ -609,5 +629,160 @@ fun GuestSidePanel(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SocialConfirmDialog(
+    show: Boolean,
+    title: String,
+    url: String,
+    onOpen: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    if (!show) return
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.82f)
+                .background(
+                    color = Color.Black.copy(alpha = 0.92f),
+                    shape = RoundedCornerShape(8.dp)
+                )
+                .border(
+                    width = 1.dp,
+                    color = Color.White.copy(alpha = 0.16f),
+                    shape = RoundedCornerShape(8.dp)
+                )
+                .padding(20.dp)
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .background(
+                            color = Color(0xFFE53935),
+                            shape = RoundedCornerShape(2.dp)
+                        )
+                )
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                Text(
+                    text = "Exit emulator to open $title?",
+                    fontSize = 21.sp,
+                    color = Color.White
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Are you sure you want to leave the emulator?",
+                    fontSize = 13.sp,
+                    color = Color.White.copy(alpha = 0.68f)
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = url,
+                    fontSize = 13.sp,
+                    color = Color.White.copy(alpha = 0.9f)
+                )
+
+                Spacer(modifier = Modifier.height(22.dp))
+
+                Divider(color = Color.White.copy(alpha = 0.12f))
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = onDismiss
+                    ) {
+                        Text(
+                            text = "Cancel",
+                            color = Color.White.copy(alpha = 0.70f),
+                            fontSize = 14.sp
+                        )
+                    }
+
+                    TextButton(
+                        onClick = {
+                            onDismiss()
+                            onOpen()
+                        }
+                    ) {
+                        Text(
+                            text = "Open",
+                            color = Color(0xFFE53935),
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SocialButton(name: String, url: String) {
+    val context = LocalContext.current
+    val confirm = remember { mutableStateOf(false) }
+
+    val (iconRes, color) = when (name) {
+        "YouTube" -> Pair(R.drawable.ic_youtube, Color(0xFFFF0000))
+        "Discord" -> Pair(R.drawable.ic_discord, Color(0xFF5865F2))
+        else -> Pair(R.drawable.ic_youtube, Color.White)
+    }
+
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        TextButton(
+            onClick = { confirm.value = true },
+            modifier = Modifier
+                .size(52.dp)
+                .background(color, RoundedCornerShape(12.dp))
+        ) {
+            Image(
+                painter = painterResource(iconRes),
+                contentDescription = null,
+                modifier = Modifier.size(28.dp)
+            )
+        }
+
+        Text(
+            text = name,
+            fontSize = 12.sp,
+            color = Color.White.copy(alpha = 0.9f)
+        )
+    }
+
+    if (confirm.value) {
+        SocialConfirmDialog(
+            show = true,
+            title = name,
+            url = url,
+            onOpen = {
+                confirm.value = false
+                context.startActivity(
+                    Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            },
+            onDismiss = { confirm.value = false }
+        )
     }
 }

@@ -13,16 +13,35 @@ data class DriverInfo(
     val name: String,
     val version: String,
     val url: String,
-    val sha256: String = ""
+    val sha256: String = "",
+    val source: DriverSource = DriverSource.SNAPDRAGON
 )
+
+enum class DriverSource(
+    val label: String,
+    val apiUrl: String
+) {
+    SNAPDRAGON(
+        "Snapdragon",
+        "https://api.github.com/repos/K11MCH1/AdrenoToolsDrivers/releases"
+    ),
+    MELI(
+        "Mali",
+        "https://api.github.com/repos/zenithblue-oss/panvk-kbase-android/releases"
+    ),
+    EXYNOS(
+        "Exynos (Xclipse)",
+        "https://api.github.com/repos/WearyConcern1165/ExynosTools/releases"
+    );
+}
 
 object DriverRepository {
 
-    private const val RELEASES_API =
-        "https://api.github.com/repos/K11MCH1/AdrenoToolsDrivers/releases"
+    /** Backwards-compatible: Snapdragon/Adreno list (old single-source behavior). */
+    suspend fun loadDrivers(): List<DriverInfo> = loadDrivers(DriverSource.SNAPDRAGON)
 
-    suspend fun loadDrivers(): List<DriverInfo> = withContext(Dispatchers.IO) {
-        val connection = URL(RELEASES_API).openConnection() as HttpURLConnection
+    suspend fun loadDrivers(source: DriverSource): List<DriverInfo> = withContext(Dispatchers.IO) {
+        val connection = URL(source.apiUrl).openConnection() as HttpURLConnection
 
         connection.connectTimeout = 10000
         connection.readTimeout = 15000
@@ -42,7 +61,13 @@ object DriverRepository {
                 for (i in 0 until releases.length()) {
                     val release = releases.getJSONObject(i)
 
-                    if (release.optBoolean("draft", false) ||
+                    if (release.optBoolean("draft", false)) {
+                        continue
+                    }
+
+                    // Meli (PanVK-kbase) publishes everything as pre-release;
+                    // Snapdragon (AdrenoTools) uses stable releases only.
+                    if (source == DriverSource.SNAPDRAGON &&
                         release.optBoolean("prerelease", false)
                     ) {
                         continue
@@ -65,6 +90,14 @@ object DriverRepository {
                             continue
                         }
 
+                        // Meli also uploads -EMULATOR.zip (glibc) and raw .so files:
+                        // only the .adpkg.zip is installable on Android.
+                        if (source == DriverSource.MELI &&
+                            !assetName.endsWith(".adpkg.zip", ignoreCase = true)
+                        ) {
+                            continue
+                        }
+
                         if (downloadUrl.isBlank()) {
                             continue
                         }
@@ -73,7 +106,8 @@ object DriverRepository {
                             DriverInfo(
                                 name = assetName,
                                 version = "$releaseName ($tagName)",
-                                url = downloadUrl
+                                url = downloadUrl,
+                                source = source
                             )
                         )
                     }

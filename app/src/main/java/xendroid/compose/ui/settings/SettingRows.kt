@@ -24,6 +24,7 @@ import xendroid.compose.Utils
 import xendroid.compose.core.SessionLogs
 import xendroid.compose.driver.DriverInfo
 import xendroid.compose.driver.DriverRepository
+import xendroid.compose.driver.DriverSource
 import xendroid.compose.settings.Setting
 import xendroid.compose.settings.SettingsHost
 
@@ -313,7 +314,9 @@ private fun DriverActionRow(
     }
 
     var showManager by remember { mutableStateOf(false) }
-    var drivers by remember { mutableStateOf<List<DriverInfo>>(emptyList()) }
+    var driverSource by remember { mutableStateOf(DriverSource.SNAPDRAGON) }
+    var driversBySource by remember { mutableStateOf<Map<DriverSource, List<DriverInfo>>>(emptyMap()) }
+    val drivers = driversBySource[driverSource] ?: emptyList()
     var loading by remember { mutableStateOf(false) }
     var downloading by remember { mutableStateOf<String?>(null) }
     var progress by remember { mutableIntStateOf(0) }
@@ -328,20 +331,20 @@ private fun DriverActionRow(
         }
     }
 
-    fun loadDrivers() {
-        if (loading || drivers.isNotEmpty()) return
+    fun loadDrivers(source: DriverSource = driverSource) {
+        if (loading || driversBySource.containsKey(source)) return
 
         loading = true
 
         scope.launch {
             runCatching {
-                DriverRepository.loadDrivers()
+                DriverRepository.loadDrivers(source)
             }.onSuccess {
-                drivers = it
+                driversBySource = driversBySource + (source to it)
             }.onFailure {
                 Toast.makeText(
                     context,
-                    "Failed to load drivers: ${it.message}",
+                    "Failed to load ${source.label} drivers: ${it.message}",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -375,7 +378,7 @@ private fun DriverActionRow(
             TextButton(
                 onClick = {
                     showManager = true
-                    loadDrivers()
+                    loadDrivers(driverSource)
                 }
             ) {
                 Text("Driver Manager")
@@ -407,9 +410,70 @@ private fun DriverActionRow(
                 }
             },
             title = {
-                Text("Custom GPU Drivers")
+                Text(
+                    when (driverSource) {
+                        DriverSource.MELI -> "Mali Drivers (PanVK)"
+                        DriverSource.EXYNOS -> "Exynos Drivers (Xclipse)"
+                        else -> "Snapdragon Drivers (Adreno)"
+                    }
+                )
             },
             text = {
+                Column(Modifier.fillMaxWidth()) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FilterChip(
+                            selected = driverSource == DriverSource.SNAPDRAGON,
+                            onClick = {
+                                if (downloading == null) {
+                                    driverSource = DriverSource.SNAPDRAGON
+                                    loadDrivers(DriverSource.SNAPDRAGON)
+                                }
+                            },
+                            label = { Text("Snapdragon") }
+                        )
+                        FilterChip(
+                            selected = driverSource == DriverSource.MELI,
+                            onClick = {
+                                if (downloading == null) {
+                                    driverSource = DriverSource.MELI
+                                    loadDrivers(DriverSource.MELI)
+                                }
+                            },
+                            label = { Text("Mali") }
+                        )
+                        FilterChip(
+                            selected = driverSource == DriverSource.EXYNOS,
+                            onClick = {
+                                if (downloading == null) {
+                                    driverSource = DriverSource.EXYNOS
+                                    loadDrivers(DriverSource.EXYNOS)
+                                }
+                            },
+                            label = { Text("Exynos (Xclipse)") }
+                        )
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+
+                    Text(
+                        when (driverSource) {
+                            DriverSource.MELI -> {
+                                "PanVK-kbase for Mali GPUs (G57/G610/G615/G720/G925). Only .adpkg.zip builds are listed."
+                            }
+                            DriverSource.EXYNOS -> {
+                                "ExynosTools for Xclipse GPUs (Xclipse 920/940/950). .zip packages are listed."
+                            }
+                            else -> "AdrenoTools for Snapdragon (Adreno) GPUs."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Spacer(Modifier.height(8.dp))
+
                 when {
                     loading -> {
                         Box(
@@ -432,7 +496,7 @@ private fun DriverActionRow(
                         ) {
                             items(
                                 drivers,
-                                key = { "${it.name}_${it.url}" }
+                                key = { "${it.source}_${it.name}_${it.url}" }
                             ) { driver ->
 
                                 val installedPath =
@@ -558,6 +622,7 @@ private fun DriverActionRow(
                             }
                         }
                     }
+                }
                 }
             },
             confirmButton = {
